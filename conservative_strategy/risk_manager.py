@@ -35,7 +35,6 @@ class RiskManager:
     def __init__(self):
         """Initialize RiskManager with global multi-asset position control"""
         self.max_trades_per_day = config.MAX_TRADES_PER_DAY
-        self.max_trades_per_day = config.MAX_TRADES_PER_DAY
         self.max_daily_loss = getattr(config, 'MAX_DAILY_LOSS', None) # Default None, set dynamically
         self.cooldown_seconds = config.COOLDOWN_SECONDS
         self.max_loss_per_trade_base = getattr(config, 'MAX_LOSS_PER_TRADE', None) # Default None, set dynamically

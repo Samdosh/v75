@@ -39,21 +39,21 @@ class TradingStrategy:
         self.min_level_touches = config.MIN_LEVEL_TOUCHES
         self.max_sl_distance_pct = config.TOPDOWN_MAX_SL_DISTANCE_PCT
 
+    def _check_data_freshness(self, df: pd.DataFrame, max_age_seconds: int = 120) -> bool:
+        if df is None or df.empty:
+            return False
+        if 'timestamp' not in df.columns:
+            return True
+        last_ts = df['timestamp'].iloc[-1]
+        now_ts = datetime.now().timestamp()
+        age = now_ts - last_ts
+        return age < max_age_seconds
+
     def analyze(self, data_1m: pd.DataFrame, data_5m: pd.DataFrame, 
                 data_1h: pd.DataFrame, data_4h: pd.DataFrame, 
                 data_1d: pd.DataFrame, data_1w: pd.DataFrame,
                 data_15m: pd.DataFrame = None,
                 symbol: str = None) -> Dict[str, Any]:
-        """
-        Main analysis method accepting all 6 timeframes.
-        
-        Args:
-            data_1m to data_1w: DataFrames for each timeframe
-            symbol: Asset symbol (e.g., 'R_75') for asset-specific filtering
-        
-        Returns:
-            Dict containing signal, levels, and trade parameters.
-        """
         passed_checks = []
         
         response = {
@@ -69,7 +69,6 @@ class TradingStrategy:
             }
         }
 
-        # Use shared app logger so logs are routed to websocket/file handlers consistently.
         def _step_log(step: int, message: str, emoji: str = "ℹ️", level: str = "info") -> None:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             line = f"[CONSERVATIVE][{symbol}] STEP {step}/6 | {ts} | {emoji} {message}"
@@ -77,7 +76,11 @@ class TradingStrategy:
 
         _step_log(1, "Starting analysis", emoji="🔎")
 
-        if symbol == "R_25":
+        if not self._check_data_freshness(data_15m):
+            response["details"]["reason"] = "Stale 15m data"
+            return response
+
+        if symbol == "R_75":
             return self._analyze_fake_breakout(data_15m, data_1d, data_1w, symbol)
  
         # ---------------------------------------------------------
@@ -433,27 +436,29 @@ class TradingStrategy:
     # --------------------------------------------------------------------------
 
     def _determine_trend(self, df: pd.DataFrame, timeframe_name: str) -> str:
-        """
-        Determines trend based on Swing Highs/Lows.
-        Bullish: Higher Highs + Higher Lows
-        Bearish: Lower Highs + Lower Lows
-        """
         if len(df) < self.swing_lookback:
             return "NEUTRAL"
 
         highs, lows = self._get_swing_points(df)
         
-        if len(highs) < 2 or len(lows) < 2:
+        if len(highs) < 3 or len(lows) < 3:
             return "NEUTRAL"
 
-        last_high = highs[-1]
-        prev_high = highs[-2]
-        last_low = lows[-1]
-        prev_low = lows[-2]
+        up_count = 0
+        down_count = 0
+        for i in range(1, min(4, len(highs))):
+            if highs[-i] > highs[-i-1]:
+                up_count += 1
+            else:
+                down_count += 1
+            if lows[-i] > lows[-i-1]:
+                up_count += 1
+            else:
+                down_count += 1
 
-        if last_high > prev_high and last_low > prev_low:
+        if up_count >= 4:
             return "UP"
-        elif last_high < prev_high and last_low < prev_low:
+        elif down_count >= 4:
             return "DOWN"
         
         return "NEUTRAL"
@@ -653,25 +658,12 @@ class TradingStrategy:
                 if valid:
                     stop = valid[-1]
 
-        # Validate Max SL Distance with Smart Clamping
-        # If structural SL is too far, we clamp it to the max safe limits (0.5%) 
-        # to ensure we don't miss the trade opportunity, while staying safe.
         if stop:
             dist_pct = abs(current_price - stop) / current_price * 100
             
             if dist_pct > self.max_sl_distance_pct:
-                logger.warning(
-                    f"[CONSERVATIVE][{symbol}] ⚠️ Structural SL too wide ({dist_pct:.2f}%). "
-                    f"Clamping to {self.max_sl_distance_pct}%"
-                )
-                
-                # Clamp SL to the max allowed distance
-                if current_price > stop: # UP Trade: SL is below
-                    stop = current_price * (1 - self.max_sl_distance_pct/100)
-                else: # DOWN Trade: SL is above
-                    stop = current_price * (1 + self.max_sl_distance_pct/100)
-                
-                # Note: TP remains at structural level, so R:R will arguably Improve
+                _step_log(4, f"SL too wide ({dist_pct:.2f}% > {self.max_sl_distance_pct}%)", emoji="❌")
+                stop = None
                 
         return target, stop
 
@@ -831,36 +823,30 @@ class TradingStrategy:
             # But the strategy implies momentum entry is allowed.
             return True, "Fresh Momentum Breakout"
 
-        # Check Depth of Retest
+        breakout_age = len(recent_data) - breakout_idx - 1
+        if breakout_age > 5:
+            return False, f"Momentum breakout too old ({breakout_age} candles ago)"
+
         if direction == "UP":
-            # Lowest point since breakout
             min_pullback = post_breakout_data['low'].min()
             min_pullback = min(min_pullback, current_close)
             
-            # If pullback went way below level, it failed.
-            # Max tolerance: Level - (0.5 * ATR)
-            if min_pullback < level_price - (atr * 0.5):
+            if min_pullback < level_price - (atr * 0.15):
                 return False, "Breakout failed (Deep retracement)"
                 
-            # Current price must be above level (or very close)
-            if current_close < level_price - (atr * 0.2):
+            if current_close < level_price - (atr * 0.1):
                 return False, "Price currently below breakout level"
                 
-        else: # DOWN
-            # Highest point since breakout
+        else:
             max_pullback = post_breakout_data['high'].max()
             max_pullback = max(max_pullback, current_close)
             
-            if max_pullback > level_price + (atr * 0.5):
+            if max_pullback > level_price + (atr * 0.15):
                 return False, "Breakout failed (Deep retracement)"
                 
-            if current_close > level_price + (atr * 0.2):
+            if current_close > level_price + (atr * 0.1):
                 return False, "Price currently above breakout level"
 
-        # WEAK_RETEST_MAX_PCT check (optional stricter check)
-        # Check if current price is within retest percentage of the impulse
-        # For simplicity, ensuring we are holding the level is the key 'Weak Retest' validation here.
-        
         return True, "Momentum Breakout + Weak Retest Confirmed"
 
     def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
@@ -1030,7 +1016,7 @@ class TradingStrategy:
                 sl_price = highest_wick + sl_buffer
 
                 setup_found = True
-                target_level = self._find_next_zone(all_levels, level_price, "DOWN")
+                target_level = self._find_next_zone(all_levels, level_price, "DOWN", current_price)
                 entry_reason = "Fake Breakout Reversal (SELL) detected"
                 break
 
@@ -1089,7 +1075,7 @@ class TradingStrategy:
                 sl_price = lowest_wick - sl_buffer
 
                 setup_found = True
-                target_level = self._find_next_zone(all_levels, level_price, "UP")
+                target_level = self._find_next_zone(all_levels, level_price, "UP", current_price)
                 entry_reason = "Fake Breakout Reversal (BUY) detected"
                 break
 
@@ -1157,11 +1143,6 @@ class TradingStrategy:
 
     def _check_rsi_divergence(self, df: pd.DataFrame, spike_price: float,
                               lookback: int, div_type: str) -> bool:
-        """
-        Proper RSI divergence check.
-        - bearish: price HH but RSI LH (at spike candle vs prior window)
-        - bullish: price LL but RSI HL (at spike candle vs prior window)
-        """
         window = lookback * 2 + 5
         recent = df.tail(window).reset_index(drop=True)
         if len(recent) < lookback + 2:
@@ -1175,13 +1156,13 @@ class TradingStrategy:
             return False
 
         rsi_vals = rsi_series.values
-        prices = recent["high"].values if div_type == "bearish" else recent["low"].values
-
-        # Find spike candle index (candle whose extreme matches spike_price)
         if div_type == "bearish":
-            spike_idx = int(np.argmax(prices))
+            price_col = recent["high"].values
         else:
-            spike_idx = int(np.argmin(prices))
+            price_col = recent["low"].values
+
+        diffs = np.abs(price_col - spike_price)
+        spike_idx = int(np.argmin(diffs))
 
         if spike_idx >= len(rsi_vals) or pd.isna(rsi_vals[spike_idx]):
             return False
@@ -1209,13 +1190,33 @@ class TradingStrategy:
             logger.info(f"[{div_type.upper()}] RSI divergence confirmed at spike {spike_price:.3f}")
         return result
         
-    def _find_next_zone(self, levels: List[Dict], current_level: float, direction: str) -> Optional[float]:
+    def _find_next_zone(self, levels: List[Dict], current_level: float, direction: str,
+                        current_price: float = None) -> Optional[float]:
+        min_tp_pct = getattr(config, 'MIN_TP_DISTANCE_PCT', 0.2) / 100.0
+        current_price = current_price or current_level
+        
         if direction == "DOWN":
             supports = [l['price'] for l in levels if l['price'] < current_level]
             if supports:
-                return max(supports)
+                tp_candidate = max(supports)
+                dist_pct = abs(tp_candidate - current_price) / current_price
+                if dist_pct >= min_tp_pct:
+                    return tp_candidate
+                supports.sort(reverse=True)
+                for s in supports:
+                    dist_pct = abs(s - current_price) / current_price
+                    if dist_pct >= min_tp_pct:
+                        return s
         else:
             resistances = [l['price'] for l in levels if l['price'] > current_level]
             if resistances:
-                return min(resistances)
+                tp_candidate = min(resistances)
+                dist_pct = abs(tp_candidate - current_price) / current_price
+                if dist_pct >= min_tp_pct:
+                    return tp_candidate
+                resistances.sort()
+                for r in resistances:
+                    dist_pct = abs(r - current_price) / current_price
+                    if dist_pct >= min_tp_pct:
+                        return r
         return None

@@ -6,6 +6,9 @@ main.py - MULTI-ASSET WITH TOP-DOWN STRATEGY SUPPORT
 
 # Triggering new build after removing problematic binary files
 import asyncio
+import json
+import logging
+import os
 import signal
 import sys
 from datetime import datetime
@@ -42,12 +45,16 @@ class TradingBot:
     """Main trading bot controller with multi-asset support"""
     
     def __init__(self):
-        """Initialize trading bot components"""
         self.running = False
         self.data_fetcher = None
         self.trade_engine = None
         self.strategy = None
         self.risk_manager = None
+        self._state_file = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "bot_state.json"
+        )
+        self._last_heartbeat = datetime.now()
         
         # Multi-asset tracking
         self.symbols = config.get_all_symbols()
@@ -162,11 +169,19 @@ class TradingBot:
             return False
     
     async def shutdown(self):
-        """Gracefully shutdown the bot"""
         logger.info("🛑 Shutting down bot...")
         
         try:
-            # Disconnect from API
+            if self.trade_engine and self.trade_engine.active_contract_id:
+                logger.warning(f"⚠️ Active trade {self.trade_engine.active_contract_id} at shutdown - will persist for recovery")
+                await self._save_state()
+            else:
+                try:
+                    if os.path.exists(self._state_file):
+                        os.remove(self._state_file)
+                except Exception:
+                    pass
+
             if self.data_fetcher:
                 await self.data_fetcher.disconnect()
             
@@ -417,13 +432,40 @@ class TradingBot:
             import traceback
             logger.error(traceback.format_exc())
     
-    async def run(self):
-        """Main trading loop"""
+    async def _save_state(self):
         try:
-            # Initialize
+            state = {
+                "timestamp": datetime.now().isoformat(),
+                "active_contract_id": self.trade_engine.active_contract_id if self.trade_engine else None,
+            }
+            with open(self._state_file, "w") as f:
+                json.dump(state, f)
+        except Exception as e:
+            logger.error(f"❌ Failed to save state: {e}")
+
+    async def _load_state(self):
+        try:
+            if not os.path.exists(self._state_file):
+                return
+            with open(self._state_file) as f:
+                state = json.load(f)
+            contract_id = state.get("active_contract_id")
+            if contract_id:
+                logger.warning(f"⚠️ Found open contract {contract_id} from previous session")
+                if self.trade_engine:
+                    status = await self.trade_engine.get_trade_status(contract_id)
+                    if status and status.get("status") not in ("won", "lost", "sold"):
+                        logger.warning(f"⚠️ Contract {contract_id} still appears open. Manual check recommended.")
+        except Exception as e:
+            logger.error(f"❌ Failed to load state: {e}")
+
+    async def run(self):
+        try:
             if not await self.initialize():
                 logger.error("❌ Failed to initialize bot")
                 return
+            
+            await self._load_state()
             
             self.running = True
             logger.info("\n🚀 Starting main trading loop")
@@ -432,7 +474,6 @@ class TradingBot:
             
             cycle_count = 0
             
-            # Main loop
             while self.running:
                 try:
                     cycle_count += 1
@@ -440,19 +481,23 @@ class TradingBot:
                     logger.info(f"CYCLE #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                     logger.info(f"{'='*60}")
                     
-                    # Execute trading cycle (scans all assets)
                     await self.trading_cycle()
                     
-                    # Check cooldown
+                    await self._save_state()
+
+                    heartbeat_interval = 300
+                    time_since_heartbeat = (datetime.now() - self._last_heartbeat).total_seconds()
+                    if time_since_heartbeat >= heartbeat_interval:
+                        logger.info(f"💓 Heartbeat: Bot alive | Cycle #{cycle_count} | Trades today: {self.risk_manager.total_trades if self.risk_manager else 0}")
+                        self._last_heartbeat = datetime.now()
+                    
                     cooldown = self.risk_manager.get_cooldown_remaining()
                     if cooldown > 0:
                         logger.info(f"⏰ Cooldown: {cooldown:.0f}s remaining")
                     
-                    # Wait before next cycle
-                    wait_time = max(cooldown, 30)  # At least 30 seconds between cycles
+                    wait_time = max(cooldown, 30)
                     logger.info(f"⏳ Next cycle in {wait_time:.0f}s...")
                     
-                    # Sleep with interrupt check
                     for _ in range(int(wait_time)):
                         if not self.running:
                             break

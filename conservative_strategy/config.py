@@ -36,17 +36,15 @@ CONTRACT_TYPE_DOWN = "MULTDOWN"  # Multiplier Down (for DOWN/SELL signals)
 # 1HZ100V and 1HZ30V are intentionally blocked and must never be traded.
 BLOCKED_SYMBOLS = {"1HZ100V", "1HZ30V"}
 
-# Removed R_10: 400x multiplier incompatible with 0.5% SL (would exceed stake on Deriv multipliers)
-SYMBOLS = ["R_25"]
+SYMBOLS = ["R_75"]
 
-# Asset-specific configuration
 ASSET_CONFIG = {
-    "R_25": {
-        "multiplier": 160,
-        "description": "Volatility 25 Index",
+    "R_75": {
+        "multiplier": 100,
+        "description": "Volatility 75 Index",
         "tick_size": 0.01,
-        "movement_threshold_pct": 0.5,  # Adjusted based on production data
-        "entry_distance_pct": 0.5  # Max entry distance from level
+        "movement_threshold_pct": 1.0,
+        "entry_distance_pct": 1.0
     }
 }
 
@@ -86,16 +84,17 @@ STOP_LOSS_PERCENT = None
 VALID_MULTIPLIERS = [40, 45, 50, 80, 100, 140, 160, 200, 400, 800, 1200, 1600]
 
 # ==================== MULTI-ASSET MONITORING ====================
-MONITOR_ALL_ASSETS = True          # Monitor all assets simultaneously
-MAX_CONCURRENT_TRADES = 2          # Maximum number of concurrent trades across all assets
+MONITOR_ALL_ASSETS = True
+MAX_CONCURRENT_TRADES = 1
 PRIORITIZE_BY_SIGNAL_STRENGTH = True  # Trade strongest signals first
 
 # ==================== DATA FETCHING ====================
-CANDLES_1M = 150                   # 1-minute candles
-CANDLES_5M = 120                   # 5-minute candles
-CANDLES_15M = 150                  # 15-minute candles
+CANDLES_1M = 150
+CANDLES_5M = 120
+CANDLES_15M = 150
 MAX_RETRIES = 3
 RETRY_DELAY = 2
+MAX_STALE_DATA_SECONDS = 120
 
 # ==================== STRATEGY PARAMETERS ====================
 # ATR Validation Ranges (can be asset-specific if needed)
@@ -199,9 +198,8 @@ RSI_DIVERGENCE_LOOKBACK = 10      # Candles to look back for prior RSI high
 FAKE_BREAKOUT_MAX_CANDLES = 5     # Max candles after spike before reversal must occur
                                    # Stale if reversal takes > 5 candles
 
-# Spike definition: how far above zone qualifies as a "fake breakout"
-FAKE_BREAKOUT_MIN_PCT = 0.05      # Spike must go >= 0.05% above zone to qualify
-FAKE_BREAKOUT_MAX_PCT = 0.8       # Spike must NOT exceed 0.8% (too extended = real breakout)
+FAKE_BREAKOUT_MIN_PCT = 0.2
+FAKE_BREAKOUT_MAX_PCT = 0.8
 
 # SL placement rule
 SL_ABOVE_SPIKE_HIGH = True        # SL sits above the highest point of the fake breakout wick
@@ -471,11 +469,6 @@ if __name__ == "__main__":
         
         # Display strategy-specific configuration
         if USE_TOPDOWN_STRATEGY:
-            # Note: validate_topdown_config() function might rely on deleted params too, checking...
-            # For now assuming it's independent or imported from strategy.py? 
-            # Actually validate_topdown_config is not defined in this file. It was called but not imported?
-            # Looking at previous file content, it seemed to be missing or I missed it.
-            # Safe bet is to print values directly.
             
             print("\n" + "=" * 75)
             print("🎯 TOP-DOWN MULTI-TIMEFRAME STRATEGY")

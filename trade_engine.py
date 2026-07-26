@@ -7,6 +7,7 @@ trade_engine.py - MULTI-ASSET VERSION
 import asyncio
 import websockets
 import json
+import itertools
 from datetime import datetime
 from typing import Dict, Optional, Any
 import config
@@ -44,6 +45,7 @@ class TradeEngine:
             1.0,
         )
         self.last_execution_reason: Optional[str] = None
+        self._req_id_counter = itertools.count(1)
         
         # Risk mode configuration
         self.risk_mode = str(risk_mode).strip().upper() if risk_mode else getattr(config, 'RISK_MODE', 'TOP_DOWN')
@@ -170,54 +172,45 @@ class TradeEngine:
             return False
     
     async def send_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Send request to API and get response"""
-        try:
-            if not await self.ensure_connected():
-                return {"error": {"message": "Failed to establish connection"}}
-            
-            async with self._ws_request_lock:
-                await self.ws.send(json.dumps(request))
-                response = await asyncio.wait_for(
-                    self.ws.recv(),
-                    timeout=self._request_timeout_seconds,
-                )
-            return json.loads(response)
-        except (websockets.exceptions.ConnectionClosed, 
-                websockets.exceptions.ConnectionClosedError) as e:
-            logger.warning(f"[WARN] Connection closed: {e}")
-            if await self.reconnect():
-                try:
-                    async with self._ws_request_lock:
-                        await self.ws.send(json.dumps(request))
-                        response = await asyncio.wait_for(
-                            self.ws.recv(),
-                            timeout=self._request_timeout_seconds,
-                        )
-                    return json.loads(response)
-                except asyncio.TimeoutError:
-                    return {
-                        "error": {
-                            "message": (
-                                f"Request timed out after {self._request_timeout_seconds:.1f}s"
-                            )
-                        }
-                    }
-                except Exception as retry_error:
-                    return {"error": {"message": str(retry_error)}}
-            return {"error": {"message": "Connection lost"}}
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Trade Engine request timed out after %.1fs",
-                self._request_timeout_seconds,
-            )
-            return {
-                "error": {
-                    "message": f"Request timed out after {self._request_timeout_seconds:.1f}s"
-                }
-            }
-        except Exception as e:
-            logger.error(f"❌ Request error: {e}")
-            return {"error": {"message": str(e)}}
+        for attempt in range(2):
+            try:
+                if not await self.ensure_connected():
+                    return {"error": {"message": "Failed to establish connection"}}
+
+                req_id = next(self._req_id_counter)
+                request_with_id = {**request, "req_id": req_id}
+                
+                async with self._ws_request_lock:
+                    await self.ws.send(json.dumps(request_with_id))
+                    response = await asyncio.wait_for(
+                        self.ws.recv(),
+                        timeout=self._request_timeout_seconds,
+                    )
+                
+                data = json.loads(response)
+                
+                resp_req_id = data.get("req_id")
+                if resp_req_id is not None and resp_req_id != req_id:
+                    logger.warning(f"req_id mismatch: sent {req_id}, got {resp_req_id}. Discarding.")
+                    if attempt == 0:
+                        continue
+                    return {"error": {"message": "Response desynchronization detected"}}
+                
+                return data
+                
+            except (websockets.exceptions.ConnectionClosed, 
+                    websockets.exceptions.ConnectionClosedError) as e:
+                logger.warning(f"[WARN] Connection closed: {e}")
+                if await self.reconnect():
+                    continue
+                return {"error": {"message": "Connection lost"}}
+            except asyncio.TimeoutError:
+                logger.warning(f"Request timed out after {self._request_timeout_seconds:.1f}s")
+                continue
+            except Exception as e:
+                logger.error(f"❌ Request error: {e}")
+                return {"error": {"message": str(e)}}
+        return {"error": {"message": "Max retries exceeded"}}
 
     async def portfolio(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -339,10 +332,8 @@ class TradeEngine:
             return None
     
     async def buy_with_proposal(self, proposal_id: str, price: float) -> Optional[Dict]:
-        """Buy a contract using a proposal ID"""
         try:
-            # Add 10% tolerance, rounded to 2 decimals
-            max_price = round(price * 1.10, 2)
+            max_price = round(price * 1.005, 2)
             
             buy_request = {
                 "buy": proposal_id,
@@ -420,10 +411,10 @@ class TradeEngine:
                 # Recalculate SL price based on max loss = stake
                 # Formula: SL_price = Entry ± (MaxLoss / (Stake * Multiplier)) * Entry
                 max_loss_pct = stake / (stake * multiplier)
-                if sl_price < entry_spot:  # DOWN trade
-                    sl_price = entry_spot * (1 - max_loss_pct)
-                else:  # UP trade
+                if sl_price < entry_spot:
                     sl_price = entry_spot * (1 + max_loss_pct)
+                else:
+                    sl_price = entry_spot * (1 - max_loss_pct)
                 
                 # Recalculate SL amount with new price
                 price_change_sl = sl_price - entry_spot
@@ -436,9 +427,12 @@ class TradeEngine:
             # Build limit order request
             # Use contract_update instead of limit_order for open contracts
             # Ensure values are strictly Python floats (not numpy types)
+            if contract_id is None:
+                logger.error("❌ TP/SL: contract_id is None")
+                return False
             limit_request = {
                 "contract_update": 1,
-                "contract_id": int(contract_id),  # Ensure int
+                "contract_id": int(contract_id),
                 "limit_order": {
                     "take_profit": float(round(tp_amount, 2)),
                     "stop_loss": float(round(sl_amount, 2))  # Positive amount for contract_update
@@ -472,7 +466,9 @@ class TradeEngine:
         The Stop Loss remains intact.
         """
         try:
-            # Deriv API: pass null/0 to cancel take_profit
+            if contract_id is None:
+                logger.error("❌ Remove TP: contract_id is None")
+                return False
             cancel_tp_request = {
                 "contract_update": 1,
                 "contract_id": int(contract_id),
@@ -734,8 +730,7 @@ class TradeEngine:
                         if rr_floor > 0 and rr_ratio < rr_floor:
                             logger.warning(f"⚠️ R:R ratio {rr_ratio:.2f} below minimum {rr_floor:.2f}")
                     
-                    # Apply the limits with proper parameter conversion
-                    await self.apply_tp_sl_limits(
+                    tp_sl_applied = await self.apply_tp_sl_limits(
                         contract_id, 
                         tp_price, 
                         sl_price,
@@ -743,6 +738,12 @@ class TradeEngine:
                         multiplier,
                         stake
                     )
+                    if not tp_sl_applied:
+                        logger.error(f"❌ TP/SL application failed for contract {contract_id} - trade is UNPROTECTED")
+                        await self.close_trade(contract_id)
+                        self.last_execution_reason = "tp_sl_apply_failed"
+                        print("FINAL DECISION: ❌ EXECUTION FAILED (TP/SL not applied)")
+                        return None
                 else:
                     logger.warning("⚠️ No TP/SL provided - trade will run without limits!")
                 
@@ -790,7 +791,6 @@ class TradeEngine:
             is_sold = contract.get('is_sold', 0) == 1
             profit = float(contract.get('profit', 0))
             
-            # Determine trade status
             if trade_status is None or trade_status == '' or trade_status == 'unknown':
                 if is_sold:
                     if profit > 0:
@@ -801,6 +801,13 @@ class TradeEngine:
                         trade_status = 'sold'
                 else:
                     trade_status = 'open'
+
+            if trade_status == 'open' and not is_sold:
+                entry_spot_check = float(contract.get('entry_spot', 0))
+                if entry_spot_check == 0 and contract.get('date_start') is None:
+                    trade_status = 'unknown'
+                    status_info = {'contract_id': contract_id, 'status': 'unknown', 'error': 'Contract may not exist'}
+                    return status_info
             
             status_info = {
                 'contract_id': contract_id,
@@ -835,15 +842,21 @@ class TradeEngine:
             last_status_log = datetime.now()
             status_log_interval = 30
             previous_spot = trade_info.get('entry_spot', 0.0)
+            consecutive_failures = 0
+            max_consecutive_failures = 10
             
             while True:
                 elapsed = (datetime.now() - start_time).total_seconds()
                 
-                # Get current trade status
                 status = await self.get_trade_status(contract_id)
                 if not status:
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_consecutive_failures:
+                        logger.error(f"❌ Trade {contract_id}: {max_consecutive_failures} consecutive status failures. Aborting monitor.")
+                        return None
                     await asyncio.sleep(monitor_interval)
                     continue
+                consecutive_failures = 0
                 
                 status_name = str(status.get('status', '')).lower()
                 is_closed = bool(status.get('is_sold')) or status_name in {'sold', 'won', 'lost'}
@@ -971,7 +984,9 @@ class TradeEngine:
             return None
     
     async def close_trade(self, contract_id: str) -> Optional[Dict]:
-        """Manually close an active trade"""
+        if contract_id is None:
+            logger.error("❌ Close trade: contract_id is None")
+            return None
         try:
             sell_request = {"sell": contract_id, "price": 0}
             

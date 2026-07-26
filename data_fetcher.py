@@ -186,13 +186,13 @@ class DataFetcher:
                         else:
                             return {"error": {"message": "Connection permanently lost"}}
 
-                # Acquire token from rate limiter (allows queued parallel producers).
                 await self.rate_limiter.acquire()
-                # CRITICAL: Deriv websocket uses a single recv stream; concurrent
-                # recv() calls raise runtime errors and can mix responses.
                 async with self._ws_request_lock:
                     await self.ws.send(json.dumps(request))
-                    response_str = await self.ws.recv()
+                    response_str = await asyncio.wait_for(
+                        self.ws.recv(),
+                        timeout=30.0,
+                    )
                     response = json.loads(response_str)
                 
                 # Check for specific transient API errors to retry
@@ -262,8 +262,20 @@ class DataFetcher:
                 'close': [float(c['close']) for c in candles]
             })
             
-            # Convert timestamp to datetime
             df['datetime'] = pd.to_datetime(df['timestamp'], unit='s')
+
+            if df['open'].isnull().any() or df['high'].isnull().any():
+                logger.warning(f"[WARNING] {symbol}: candles contain null prices. Dropping.")
+                return None
+
+            if not df['timestamp'].is_monotonic_increasing:
+                logger.warning(f"[WARNING] {symbol}: candles not in order. Sorting.")
+                df = df.sort_values('timestamp')
+
+            expected = min(count, len(candles))
+            actual = len(df)
+            if actual < expected * 0.8:
+                logger.warning(f"[WARNING] {symbol}: expected ~{expected} candles, got {actual}")
             
             logger.debug(f"[OK] Fetched {len(df)} {symbol} candles ({granularity}s)")
             return df
@@ -381,7 +393,6 @@ class DataFetcher:
             '1h': 3600,
             '4h': 14400,
             '1d': 86400,
-            '1d': 86400,
             '1w': 86400  # Hack: Fetch 1d and resample to 1w
         }
         
@@ -480,9 +491,6 @@ class DataFetcher:
                     data[tf] = df
                 else:
                     logger.warning(f"[WARNING] Empty or failed {symbol} {tf} data")
-                
-                # Rate limiting between requests
-                await asyncio.sleep(0.3)
                 
             except Exception as e:
                 logger.error(f"[ERROR] Failed to fetch {symbol} {tf}: {e}")
