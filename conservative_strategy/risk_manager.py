@@ -37,8 +37,10 @@ class RiskManager:
         self.max_trades_per_day = config.MAX_TRADES_PER_DAY
         self.max_daily_loss = getattr(config, 'MAX_DAILY_LOSS', None) # Default None, set dynamically
         self.cooldown_seconds = config.COOLDOWN_SECONDS
+        self.cooldown_after_loss_seconds = getattr(config, 'COOLDOWN_AFTER_LOSS_SECONDS', 600)
         self.max_loss_per_trade_base = getattr(config, 'MAX_LOSS_PER_TRADE', None) # Default None, set dynamically
         self.fixed_stake = None # STRICTLY USER DEFINED - Must be set via update_risk_settings
+        self.last_trade_was_loss = False  # Track last trade outcome for adaptive cooldown
         
         # Trade tracking - GLOBAL across all assets
         self.trades_today: List[Dict] = []
@@ -281,16 +283,18 @@ class RiskManager:
                 print(f"[RISK] ⛔ Max Daily Loss Hit: {format_currency(self.daily_pnl)}")
             return False, reason
         
-        # GLOBAL cooldown (applies to all assets)
+        # GLOBAL cooldown (applies to all assets) - adaptive by last trade outcome
         if self.last_trade_time:
             time_since_last = (datetime.now() - self.last_trade_time).total_seconds()
+            cooldown = self.cooldown_after_loss_seconds if self.last_trade_was_loss else self.cooldown_seconds
             
-            if time_since_last < self.cooldown_seconds:
-                remaining = self.cooldown_seconds - time_since_last
-                reason = f"GLOBAL cooldown active ({remaining:.0f}s remaining)"
+            if time_since_last < cooldown:
+                remaining = cooldown - time_since_last
+                cooldown_type = "loss" if self.last_trade_was_loss else "win/default"
+                reason = f"GLOBAL cooldown active ({remaining:.0f}s remaining, {cooldown_type})"
                 
                 if verbose:
-                    print(f"[RISK] ⏳ Cooldown: {remaining:.0f}s wait")
+                    print(f"[RISK] ⏳ Cooldown ({cooldown_type}): {remaining:.0f}s wait")
                 return False, reason
         
         return True, "OK"
@@ -913,12 +917,14 @@ class RiskManager:
         if pnl > 0:
             self.winning_trades += 1
             self.consecutive_losses = 0
+            self.last_trade_was_loss = False
             if pnl > self.largest_win:
                 self.largest_win = pnl
             logger.info("WIN | GLOBAL consecutive losses reset to 0")
         elif pnl < 0:
             self.losing_trades += 1
             self.consecutive_losses += 1
+            self.last_trade_was_loss = True
             if pnl < self.largest_loss:
                 self.largest_loss = pnl
             logger.warning(f"LOSS | GLOBAL consecutive losses: {self.consecutive_losses}/{self.max_consecutive_losses}")

@@ -8,10 +8,10 @@ def strategy():
 
 def test_strategy_insufficient_data(strategy):
     """Test strategy behavior with empty DataFrames"""
-    res = strategy.analyze(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), 
-                           pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+    empty = pd.DataFrame()
+    res = strategy.analyze(empty, empty, empty, empty, empty, empty, data_15m=empty)
     assert res['can_trade'] is False
-    assert "Insufficient data" in res['details']['reason']
+    assert "Stale 15m data" in res['details']['reason']
 
 def test_strategy_bullish_alignment(strategy, sample_ohlc_data):
     """Test strategy with all timeframes bullish"""
@@ -23,7 +23,7 @@ def test_strategy_bullish_alignment(strategy, sample_ohlc_data):
     data_5m = sample_ohlc_data(n=n, trend="bullish")
     data_1m = sample_ohlc_data(n=n, trend="bullish")
     
-    res = strategy.analyze(data_1m, data_5m, data_1h, data_4h, data_1d, data_1w, symbol="R_25")
+    res = strategy.analyze(data_1m, data_5m, data_1h, data_4h, data_1d, data_1w, data_15m=data_5m, symbol="R_25")
     assert "details" in res
     assert "reason" in res["details"]
 

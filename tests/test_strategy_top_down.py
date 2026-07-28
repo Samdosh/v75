@@ -26,7 +26,7 @@ def test_strategy_init(strategy):
 def test_strategy_analyze_no_data(strategy):
     res = strategy.analyze(None, None, None, None, None, None)
     assert res["can_trade"] is False
-    assert "Insufficient data" in res["details"]["reason"]
+    assert "Stale 15m data" in res["details"]["reason"]
 
 def test_strategy_analyze_weak_trend(strategy, base_ohlc):
     # Mock calculate_adx to return low value
@@ -34,7 +34,7 @@ def test_strategy_analyze_weak_trend(strategy, base_ohlc):
         mp.setattr("strategy.calculate_adx", lambda x: pd.Series([10] * len(x)))
         mp.setattr("strategy.calculate_rsi", lambda x: pd.Series([50] * len(x)))
         
-        res = strategy.analyze(base_ohlc, base_ohlc, base_ohlc, base_ohlc, base_ohlc, base_ohlc)
+        res = strategy.analyze(base_ohlc, base_ohlc, base_ohlc, base_ohlc, base_ohlc, base_ohlc, data_15m=base_ohlc)
         assert res["can_trade"] is False
         assert "Trend too weak" in res["details"]["reason"]
 
@@ -53,7 +53,7 @@ def test_strategy_analyze_conflict_trend(strategy, base_ohlc):
         mp.setattr("indicators.detect_consolidation", lambda *args, **kwargs: (True, 100, 90))
         mp.setattr(strategy, "_determine_trend", mock_determine_trend)
         
-        res = strategy.analyze(base_ohlc, base_ohlc, base_ohlc, base_ohlc, base_ohlc, base_ohlc)
+        res = strategy.analyze(base_ohlc, base_ohlc, base_ohlc, base_ohlc, base_ohlc, base_ohlc, data_15m=base_ohlc)
         assert res["can_trade"] is False
         assert "Trend Conflict" in res["details"]["reason"]
 
@@ -154,7 +154,7 @@ def test_strategy_analyze_success_up(strategy, base_ohlc):
         mp.setattr(config, "MIN_TP_DISTANCE_PCT", 0.1)
         mp.setattr(strategy, "min_rr_ratio", 1.5)
         
-        res = strategy.analyze(base_ohlc, base_ohlc, base_ohlc, base_ohlc, base_ohlc, base_ohlc, symbol="R_TEST")
+        res = strategy.analyze(base_ohlc, base_ohlc, base_ohlc, base_ohlc, base_ohlc, base_ohlc, data_15m=base_ohlc, symbol="R_TEST")
         assert res["can_trade"] is True
         assert res["signal"] == "UP"
         assert res["take_profit"] == 120.0

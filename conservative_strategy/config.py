@@ -64,14 +64,15 @@ MAX_RISK_PCT = 50.0                # Never risk more than 50% of stake
 MAX_LOSS_PER_TRADE = None           # DYNAMIC (1x User Stake)
 
 # Minimum Risk-to-Reward Ratio
-MIN_RR_RATIO = 2.5                 # Minimum 1:2.5 risk/reward to take trade (Increased from 2.0)
+MIN_RR_RATIO = 1.8                 # Minimum 1:1.8 risk/reward to take trade
 STRICT_RR_ENFORCEMENT = True       # Hard reject if fails
 
 MAX_CONSECUTIVE_LOSSES = 3         # Stop trading after 3 losses in a row (Global)
 DAILY_LOSS_MULTIPLIER = 3.0        # Max Daily Loss = 3.0x Stake
 STAKE_LIMIT_MULTIPLIER = 1.5       # Max Stake Limit = 1.5x Base Stake
 
-COOLDOWN_SECONDS = 300             # 5 minutes between trades
+COOLDOWN_SECONDS = 180             # 3 minutes between trades (default/after win)
+COOLDOWN_AFTER_LOSS_SECONDS = 600  # 10 minutes between trades after a losing trade
 MAX_TRADES_PER_DAY = 30            # Maximum trades per day
 MAX_DAILY_LOSS = None               # DYNAMIC (Multiplied by DAILY_LOSS_MULTIPLIER)
 
@@ -132,8 +133,8 @@ MONITOR_INTERVAL = 2               # Check every 2 seconds for TP/SL hits
 
 # Stagnation Exit Settings (Percentage Based)
 ENABLE_STAGNATION_EXIT = True      # Close if trade is stuck in loss
-STAGNATION_EXIT_TIME = 720         # 720 seconds
-STAGNATION_LOSS_PCT = 15.0         # Exit if losing 15% of stake after 720s
+STAGNATION_EXIT_TIME = 420         # 420 seconds (7 minutes)
+STAGNATION_LOSS_PCT = 10.0         # Exit if losing 10% of stake after 420s
 
 # ==================== LOGGING ====================
 LOG_FILE = "logs/conservative/conservative_bot.log"
@@ -198,8 +199,8 @@ RSI_DIVERGENCE_LOOKBACK = 10      # Candles to look back for prior RSI high
 FAKE_BREAKOUT_MAX_CANDLES = 5     # Max candles after spike before reversal must occur
                                    # Stale if reversal takes > 5 candles
 
-FAKE_BREAKOUT_MIN_PCT = 0.2
-FAKE_BREAKOUT_MAX_PCT = 0.8
+FAKE_BREAKOUT_MIN_PCT = 0.15
+FAKE_BREAKOUT_MAX_PCT = 1.2
 
 # SL placement rule
 SL_ABOVE_SPIKE_HIGH = True        # SL sits above the highest point of the fake breakout wick
@@ -222,7 +223,7 @@ STRUCTURE_CONFIRMATION_CANDLES = 3 # Wait N candles to confirm structure break
 # ==================== RISK MANAGEMENT FOR TOP-DOWN ====================
 TOPDOWN_USE_DYNAMIC_TP = True      # TP based on untested levels (not fixed %)
 TOPDOWN_USE_STRUCTURE_SL = True    # SL based on swing points (not fixed %)
-TOPDOWN_MIN_RR_RATIO = 2.5         # Minimum 1:2.5 risk/reward to take trade (Synced with MIN_RR_RATIO)
+TOPDOWN_MIN_RR_RATIO = 1.8         # Minimum 1:1.8 risk/reward to take trade (Synced with MIN_RR_RATIO)
 TOPDOWN_MAX_SL_DISTANCE_PCT = 0.9   # Maximum SL distance: 0.9% from entry (Increased for trade breathing room)
 
 # Exit strategy - TP/SL only (no time-based exits)
@@ -243,8 +244,8 @@ MAX_PRICE_MOVEMENT_PCT = 0.5       # Reject if price moved > 0.5% already (~150 
 MAX_PRICE_MOVEMENT_PIPS = 150      # Alternative: Reject if moved > 150 pips (not currently used)
 
 # Parabolic spike detection
-PARABOLIC_CANDLE_COUNT = 3         # N consecutive large candles = parabolic
-PARABOLIC_CANDLE_SIZE = 2.0        # Each candle > 2.0x ATR
+PARABOLIC_CANDLE_COUNT = 4         # N consecutive large candles = parabolic
+PARABOLIC_CANDLE_SIZE = 2.5        # Each candle > 2.5x ATR
 
 # Consolidation detection
 CONSOLIDATION_ATR_MULTIPLIER = 0.6 # ATR < 60% of average = consolidating
@@ -262,25 +263,31 @@ ENABLE_MULTI_TIER_TRAILING = True
 
 # Tiers: Lock profits as they grow
 TRAILING_STOPS = [
-    # Stage 1: Initial protection (starts at 25%)
+    # Stage 1: Early lock-in (catches small winners before they reverse)
     {
-        'trigger_pct': 30.0,     # Activate at 30% profit
-        'trail_pct': 8.0,       # Trail 8% behind current price
+        'trigger_pct': 15.0,     # Activate at 15% profit
+        'trail_pct': 5.0,       # Trail 5% behind current price
+        'name': 'Early Lock'
+    },
+    # Stage 2: Initial protection
+    {
+        'trigger_pct': 25.0,     # Activate at 25% profit
+        'trail_pct': 7.0,       # Trail 7% behind current price
         'name': 'Initial Lock'
     },
-    # Stage 2: Big winner
+    # Stage 3: Big winner
     {
         'trigger_pct': 40.0,     # At 40% profit
         'trail_pct': 12.0,       # Trail 12% behind
         'name': 'Big Winner'
     },
-    # Stage 3: Excellent winner
+    # Stage 4: Excellent winner
     {
         'trigger_pct': 60.0,     # At 60% profit
         'trail_pct': 18.0,       # Trail 18% behind
         'name': 'Excellent Winner'
     },
-    # Stage 4: Exceptional winner
+    # Stage 5: Exceptional winner
     {
         'trigger_pct': 100.0,    # At 100% profit
         'trail_pct': 25.0,       # Trail 25% behind
@@ -292,8 +299,8 @@ TRAILING_STOPS = [
 # ==================== BREAKEVEN PROTECTION ====================
 # Breakeven rule: Lock profit protection once trade reaches threshold
 ENABLE_BREAKEVEN_RULE = True       # Enable/disable breakeven protection
-BREAKEVEN_TRIGGER_PCT = 20.0       # Activate breakeven at 20% profit
-BREAKEVEN_MAX_LOSS_PCT = 5.0       # Maximum allowed loss after breakeven triggers (-5% of stake)
+BREAKEVEN_TRIGGER_PCT = 12.0       # Activate breakeven at 12% profit
+BREAKEVEN_MAX_LOSS_PCT = 3.0       # Maximum allowed loss after breakeven triggers (-3% of stake)
 
 
 # ==================== CONFLUENCE SCORING ====================

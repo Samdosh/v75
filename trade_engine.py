@@ -269,6 +269,61 @@ class TradeEngine:
             return False
         return True
     
+    async def _verify_entry_conditions(self, symbol: str, direction: str) -> tuple:
+        """
+        Pre-entry tick/spread check to avoid entering during widening
+        spreads or unfavourable tick movement.
+        
+        Returns:
+            (ok: bool, reason: str, spread_pct: float | None)
+        """
+        try:
+            if not self.is_connected or not self.ws or self.ws.closed:
+                return False, "WebSocket not connected", None
+
+            tick_req = {"ticks": symbol}
+            async with self._ws_request_lock:
+                await self.ws.send(json.dumps(tick_req))
+                tick_response = await asyncio.wait_for(
+                    self.ws.recv(),
+                    timeout=self._request_timeout_seconds,
+                )
+            tick_data = json.loads(tick_response)
+
+            if "error" in tick_data:
+                return False, f"Tick request failed: {tick_data['error']['message']}", None
+
+            tick = tick_data.get("tick", {})
+            bid = float(tick.get("bid", 0))
+            ask = float(tick.get("ask", 0))
+            quote = float(tick.get("quote", 0))
+
+            if bid <= 0 or ask <= 0:
+                return False, "Tick bid/ask unavailable", None
+
+            spread = ask - bid
+            spread_pct = (spread / bid) * 100 if bid > 0 else 0.0
+
+            # R_75 typically has 1-3 tick spread (~0.01-0.03%)
+            # Widen threshold to 0.05% to avoid false negatives
+            if spread_pct > 0.05:
+                return False, f"Spread too wide ({spread_pct:.3f}% > 0.05%)", spread_pct
+
+            # Check tick direction aligns with signal
+            tick_mid = (bid + ask) / 2
+            if direction == "UP" and quote < tick_mid - (spread * 0.5):
+                return False, f"Tick quotes below mid-point for UP entry", spread_pct
+            if direction == "DOWN" and quote > tick_mid + (spread * 0.5):
+                return False, f"Tick quotes above mid-point for DOWN entry", spread_pct
+
+            return True, f"Spread OK ({spread_pct:.3f}%)", spread_pct
+
+        except asyncio.TimeoutError:
+            return False, "Tick request timed out", None
+        except Exception as e:
+            logger.warning(f"Pre-entry tick check failed (non-blocking): {e}")
+            return True, "Tick check unavailable, proceeding", None
+    
     async def get_proposal(self, direction: str, stake: float, symbol: str) -> Optional[Dict]:
         """
         Get a trade proposal for any configured asset
@@ -1154,6 +1209,14 @@ class TradeEngine:
                 self.last_execution_reason = "missing_stake"
                 logger.error(f"❌ Missing stake amount for {symbol}")
                 return None
+
+            tick_ok, tick_reason, tick_spread = await self._verify_entry_conditions(symbol, direction)
+            if not tick_ok:
+                self.last_execution_reason = "tick_spread_rejected"
+                logger.warning(f"⚠️ Pre-entry tick check rejected: {tick_reason}")
+                return None
+            if tick_spread is not None:
+                logger.info(f"✅ Pre-entry tick check passed ({tick_reason})")
                 
             trade_info = await self.open_trade(
                 direction=direction,

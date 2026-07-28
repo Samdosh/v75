@@ -81,7 +81,7 @@ class TradingStrategy:
             return response
 
         if symbol == "R_75":
-            return self._analyze_fake_breakout(data_15m, data_1d, data_1w, symbol)
+            return self._analyze_fake_breakout(data_15m, data_5m, data_1d, data_1w, symbol)
  
         # ---------------------------------------------------------
         # MANDATORY LOGGING HEADER (Simplified)
@@ -867,9 +867,9 @@ class TradingStrategy:
         
         return atr if not pd.isna(atr) else 0.0
 
-    def _analyze_fake_breakout(self, data_15m: pd.DataFrame, data_1d: pd.DataFrame, data_1w: pd.DataFrame, symbol: str) -> Dict[str, Any]:
+    def _analyze_fake_breakout(self, data_15m: pd.DataFrame, data_5m: pd.DataFrame, data_1d: pd.DataFrame, data_1w: pd.DataFrame, symbol: str) -> Dict[str, Any]:
         """
-        Fake Breakout Reversal Strategy for R_25.
+        Fake Breakout Reversal Strategy for R_75.
         Primary bias: Weekly | Secondary: Daily | Execution: M15
 
         Fixes applied:
@@ -1082,6 +1082,25 @@ class TradingStrategy:
         if not setup_found:
             response["details"]["reason"] = f"No Fake Breakout pattern within {max_candles} candles"
             return response
+
+        # ── 4.5. 5-Minute Entry Confirmation ────────────────────────────
+        if data_5m is not None and not data_5m.empty:
+            try:
+                rsi_5m = calculate_rsi(data_5m).iloc[-1]
+            except Exception:
+                rsi_5m = 50
+            if not pd.isna(rsi_5m):
+                if direction == "DOWN" and rsi_5m > 55:
+                    _step_log(5, f"5m RSI {rsi_5m:.1f} > 55 for DOWN signal - not overbought on 15m but too high on 5m", "⚠️")
+                    response["details"]["reason"] = f"5m RSI {rsi_5m:.1f} too high for DOWN entry"
+                    return response
+                if direction == "UP" and rsi_5m < 45:
+                    _step_log(5, f"5m RSI {rsi_5m:.1f} < 45 for UP signal - not oversold on 15m but too low on 5m", "⚠️")
+                    response["details"]["reason"] = f"5m RSI {rsi_5m:.1f} too low for UP entry"
+                    return response
+                passed_checks.append(f"5m Confirmation (RSI {rsi_5m:.1f})")
+        else:
+            _step_log(5, "5m data unavailable for confirmation gate - skipping", "⚠️")
 
         if not target_level:
             response["details"]["reason"] = "No next zone found for Take Profit"
