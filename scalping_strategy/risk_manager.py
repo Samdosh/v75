@@ -1265,59 +1265,7 @@ class ScalpingRiskManager(BaseRiskManager):
         return {"should_close": False, "reason": "monitor_active"}
 
     def check_stagnation_exit(self, trade_info: Dict, current_pnl: float) -> Tuple[bool, str]:
-        """
-        Close stale losing trades.
-        """
-        contract_id = trade_info.get("contract_id")
-        if contract_id:
-            meta = self._trade_metadata.get(contract_id, {})
-            if isinstance(meta, dict) and not bool(meta.get("stagnation_enabled", True)):
-                return False, ""
-
-        open_time = trade_info.get("open_time")
-        stake = trade_info.get("stake", self.stake)
-        symbol = trade_info.get("symbol", "UNKNOWN")
-        if not open_time:
-            return False, ""
-
-        time_open = (datetime.now() - open_time).total_seconds()
-        rr_ratio = 0.0
-        try:
-            rr_ratio = float(trade_info.get("risk_reward_ratio", 0.0) or 0.0)
-        except Exception:
-            rr_ratio = 0.0
-
-        symbol_overrides = getattr(scalping_config, "SCALPING_SYMBOL_STAGNATION_OVERRIDES", {}) or {}
-        stagnation_time_limit = int(
-            symbol_overrides.get(
-                symbol,
-                getattr(scalping_config, "SCALPING_STAGNATION_EXIT_TIME", 120),
-            )
-        )
-        rr_grace_threshold = float(
-            getattr(scalping_config, "SCALPING_STAGNATION_RR_GRACE_THRESHOLD", 2.5)
-        )
-        rr_extra_time = int(getattr(scalping_config, "SCALPING_STAGNATION_EXTRA_TIME", 0))
-        if rr_ratio >= rr_grace_threshold and rr_extra_time > 0:
-            stagnation_time_limit += rr_extra_time
-
-        if time_open < stagnation_time_limit:
-            return False, ""
-
-        if current_pnl >= 0:
-            return False, ""
-
-        loss_pct = abs((current_pnl / stake) * 100) if stake > 0 else 0
-        if loss_pct > scalping_config.SCALPING_STAGNATION_LOSS_PCT:
-            logger.warning(
-                "[SCALP] Stagnation exit: %s open %ss (limit %ss, RR %.2f), losing %.1f%% of stake",
-                symbol,
-                int(time_open),
-                stagnation_time_limit,
-                rr_ratio,
-                loss_pct,
-            )
-            return True, "stagnation_exit"
+        """Stagnation exit disabled — server-side stop loss handles loss protection."""
         return False, ""
 
     def check_trailing_profit(self, trade_info: Dict, current_pnl: float) -> Tuple[bool, str, bool]:

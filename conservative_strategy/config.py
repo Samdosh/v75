@@ -137,10 +137,10 @@ MONITOR_INTERVAL = 2               # Check every 2 seconds for TP/SL hits
 
 
 
-# Stagnation Exit Settings (Percentage Based)
-ENABLE_STAGNATION_EXIT = True      # Close if trade is stuck in loss
-STAGNATION_EXIT_TIME = 420         # 420 seconds (7 minutes)
-STAGNATION_LOSS_PCT = 10.0         # Exit if losing 10% of stake after 420s
+# Stagnation Exit Settings (Percentage Based) — DISABLED: server-side SL handles loss protection
+ENABLE_STAGNATION_EXIT = False
+STAGNATION_EXIT_TIME = 420
+STAGNATION_LOSS_PCT = 10.0
 
 # ==================== LOGGING ====================
 LOG_FILE = "logs/conservative/conservative_bot.log"

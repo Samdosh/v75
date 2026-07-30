@@ -736,40 +736,44 @@ class TradeEngine:
                 print(f"Entry Price: {entry_spot}")
                 print("="*50 + "\n")
                 
-                # Apply TP/SL limits if provided
-                if tp_price and sl_price:
-                    logger.debug(f"TP: {tp_price:.4f} | SL: {sl_price:.4f}")
-                    
-                    # Validate R:R ratio
-                    distance_to_tp = abs(tp_price - entry_spot)
-                    distance_to_sl = abs(entry_spot - sl_price)
-                    
-                    if distance_to_sl > 0:
-                        rr_ratio = distance_to_tp / distance_to_sl
-                        rr_floor = (
-                            float(min_rr_ratio)
-                            if min_rr_ratio is not None
-                            else float(getattr(config, "MIN_RR_RATIO", 0.0) or 0.0)
-                        )
-                        if rr_floor > 0 and rr_ratio < rr_floor:
-                            logger.warning(f"⚠️ R:R ratio {rr_ratio:.2f} below minimum {rr_floor:.2f}")
-                    
-                    tp_sl_applied = await self.apply_tp_sl_limits(
-                        contract_id, 
-                        tp_price, 
-                        sl_price,
-                        entry_spot,
-                        multiplier,
-                        stake
+                # Apply TP/SL limits — required for protection
+                if not tp_price or not sl_price:
+                    logger.error(f"❌ TP and SL are required for {symbol} — rejecting unprotected trade")
+                    await self.close_trade(contract_id)
+                    self.last_execution_reason = "tp_sl_missing"
+                    print("FINAL DECISION: ❌ EXECUTION FAILED (TP/SL not provided)")
+                    return None
+
+                logger.debug(f"TP: {tp_price:.4f} | SL: {sl_price:.4f}")
+
+                # Validate R:R ratio
+                distance_to_tp = abs(tp_price - entry_spot)
+                distance_to_sl = abs(entry_spot - sl_price)
+
+                if distance_to_sl > 0:
+                    rr_ratio = distance_to_tp / distance_to_sl
+                    rr_floor = (
+                        float(min_rr_ratio)
+                        if min_rr_ratio is not None
+                        else float(getattr(config, "MIN_RR_RATIO", 0.0) or 0.0)
                     )
-                    if not tp_sl_applied:
-                        logger.error(f"❌ TP/SL application failed for contract {contract_id} - trade is UNPROTECTED")
-                        await self.close_trade(contract_id)
-                        self.last_execution_reason = "tp_sl_apply_failed"
-                        print("FINAL DECISION: ❌ EXECUTION FAILED (TP/SL not applied)")
-                        return None
-                else:
-                    logger.warning("⚠️ No TP/SL provided - trade will run without limits!")
+                    if rr_floor > 0 and rr_ratio < rr_floor:
+                        logger.warning(f"⚠️ R:R ratio {rr_ratio:.2f} below minimum {rr_floor:.2f}")
+
+                tp_sl_applied = await self.apply_tp_sl_limits(
+                    contract_id, 
+                    tp_price, 
+                    sl_price,
+                    entry_spot,
+                    multiplier,
+                    stake
+                )
+                if not tp_sl_applied:
+                    logger.error(f"❌ TP/SL application failed for contract {contract_id} — trade is UNPROTECTED")
+                    await self.close_trade(contract_id)
+                    self.last_execution_reason = "tp_sl_apply_failed"
+                    print("FINAL DECISION: ❌ EXECUTION FAILED (TP/SL not applied)")
+                    return None
                 
                 if notifier is not None:
                     try:
