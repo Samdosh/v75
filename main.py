@@ -90,12 +90,12 @@ class TradingBot:
             logger.info("🔧 Initializing components...")
             
             self.data_fetcher = DataFetcher(
-                config.DERIV_API_TOKEN,
+                config.DERIV_API_TOKEN_RAW or config.DERIV_API_TOKEN,
                 config.DERIV_APP_ID
             )
-            
+
             self.trade_engine = TradeEngine(
-                config.DERIV_API_TOKEN,
+                config.DERIV_API_TOKEN_RAW or config.DERIV_API_TOKEN,
                 config.DERIV_APP_ID
             )
             

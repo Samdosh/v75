@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Dict, Optional, Any
 import config
 from utils import setup_logger, format_currency, get_status_emoji
+from app.core.deriv_api_otp import get_otp_url
 
 logger = setup_logger()
 
@@ -78,23 +79,19 @@ class TradeEngine:
                 logger.info("   TP/SL: Strategy-defined (no global TP/SL percentages)")
     
     async def connect(self) -> bool:
-        """Connect to Deriv WebSocket API"""
+        """Connect to Deriv WebSocket API via OTP authentication"""
         try:
-            logger.info(f"TradeEngine connecting to {self.ws_url}...")
+            otp_url = await get_otp_url(self.app_id, self.api_token)
+            self.ws_url = otp_url
+            logger.info(f"TradeEngine connecting via OTP...")
             self.ws = await websockets.connect(
-                self.ws_url,
+                otp_url,
                 ping_interval=30,
                 ping_timeout=10
             )
             self.is_connected = True
             self.reconnect_attempts = 0
-            logger.info("✅ Trade Engine connected to Deriv API")
-            
-            if not await self.authorize():
-                logger.error("❌ Trade Engine authorization failed")
-                await self.disconnect()
-                return False
-                
+            logger.info("✅ Trade Engine connected to Deriv API via OTP")
             return True
         except asyncio.TimeoutError:
             self.is_connected = False
@@ -141,35 +138,7 @@ class TradeEngine:
             self.is_connected = False
             logger.info("🔌 Trade Engine disconnected")
     
-    async def authorize(self) -> bool:
-        """Authorize connection with API token"""
-        try:
-            auth_request = {"authorize": self.api_token}
-            async with self._ws_request_lock:
-                await self.ws.send(json.dumps(auth_request))
-                response = await asyncio.wait_for(
-                    self.ws.recv(),
-                    timeout=self._request_timeout_seconds,
-                )
-            data = json.loads(response)
-            
-            if "error" in data:
-                logger.error(f"❌ Authorization failed: {data['error']['message']}")
-                return False
-            
-            if "authorize" in data:
-                logger.info("✅ Trade Engine authorized")
-                return True
-            return False
-        except asyncio.TimeoutError:
-            logger.error(
-                "Trade Engine authorization timed out after %.1fs",
-                self._request_timeout_seconds,
-            )
-            return False
-        except Exception as e:
-            logger.error(f"❌ Authorization error: {e}")
-            return False
+# OTP-based authentication replaces the old authorize flow
     
     async def send_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
         for attempt in range(2):
@@ -357,7 +326,7 @@ class TradeEngine:
                 "contract_type": contract_type,
                 "currency": "USD",
                 "multiplier": multiplier,
-                "symbol": symbol
+                "underlying_symbol": symbol
             }
             
             logger.debug(f"📋 Requesting proposal for {symbol} ({multiplier}x multiplier)...")

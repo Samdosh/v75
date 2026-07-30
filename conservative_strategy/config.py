@@ -19,7 +19,13 @@ API_TOKEN = os.getenv("API_TOKEN")
 APP_ID = os.getenv("APP_ID", "1089")
 
 DERIV_API_TOKEN = API_TOKEN if API_TOKEN else os.getenv("DERIV_API_TOKEN")
+DERIV_API_TOKEN_RAW = DERIV_API_TOKEN  # Preserve original (with pat_ prefix) for new API
 DERIV_APP_ID = APP_ID if APP_ID and APP_ID != "1089" else os.getenv("DERIV_APP_ID", "1089")
+
+# Auto-strip Deriv "pat_" prefix from API tokens (Native app requirement)
+if DERIV_API_TOKEN and DERIV_API_TOKEN.startswith("pat_"):
+    DERIV_API_TOKEN = DERIV_API_TOKEN[4:]
+    print("Token pat_ prefix auto-stripped for Native app compatibility")
 
 if not DERIV_API_TOKEN or DERIV_API_TOKEN == "your_api_token_here":
     # In multi-tenant mode, logical fallback is to allow None and require user-specific keys

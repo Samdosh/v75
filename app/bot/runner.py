@@ -112,7 +112,7 @@ class BotRunner:
 
         # Identity
         self.account_id = account_id
-        self.api_token = api_token or config.DERIV_API_TOKEN
+        self.api_token = api_token or config.DERIV_API_TOKEN_RAW or config.DERIV_API_TOKEN
 
         # Instance State
         self.state = BotState()

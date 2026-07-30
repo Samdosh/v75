@@ -50,6 +50,8 @@ from typing import Dict, Any, Optional
 
 from risefallbot import rf_config
 
+from app.core.deriv_api_otp import get_otp_url
+
 logger = logging.getLogger("risefallbot.engine")
 
 # Registry of the most recent buy attempt per symbol, used by ghost detection
@@ -84,37 +86,25 @@ class RFTradeEngine:
     # ------------------------------------------------------------------ #
 
     async def connect(self) -> bool:
-        """Connect to Deriv WebSocket API."""
+        """Connect to Deriv WebSocket API via OTP authentication."""
         try:
-            logger.info("[RF-Engine] 🔌 Connecting to Deriv API...")
+            logger.info("[RF-Engine] 🔌 Connecting to Deriv API via OTP...")
+            otp_url = await get_otp_url(self.app_id, self.api_token)
+            self.ws_url = otp_url
             self.ws = await websockets.connect(
-                self.ws_url,
+                otp_url,
                 ping_interval=30,
                 ping_timeout=10,
                 close_timeout=5,
             )
-            logger.info("[RF-Engine] ✅ WebSocket connected")
-            return await self._authorize()
+            self.authorized = True
+            logger.info("[RF-Engine] ✅ WebSocket connected via OTP")
+            return True
         except Exception as e:
             logger.error(f"[RF-Engine] ❌ Connection failed: {e}")
             return False
 
-    async def _authorize(self) -> bool:
-        """Authorize the WebSocket connection."""
-        try:
-            resp = await self._send({"authorize": self.api_token})
-            if resp and "authorize" in resp:
-                self.authorized = True
-                balance = resp["authorize"].get("balance", "?")
-                logger.info(f"[RF-Engine] ✅ Authorized | balance=${balance}")
-                return True
-            else:
-                error = resp.get("error", {}).get("message", "Unknown")
-                logger.error(f"[RF-Engine] ❌ Authorization failed: {error}")
-                return False
-        except Exception as e:
-            logger.error(f"[RF-Engine] ❌ Authorization error: {e}")
-            return False
+    # OTP-based auth replaces _authorize() — removed
 
     async def reconnect(self) -> bool:
         """Attempt reconnection."""
@@ -409,7 +399,7 @@ class RFTradeEngine:
             "price": stake,
             "parameters": {
                 "contract_type": contract_type,
-                "symbol":        symbol,
+                "underlying_symbol": symbol,
                 "duration":      duration,
                 "duration_unit": duration_unit,
                 "basis":         "stake",

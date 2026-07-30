@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 import config
 from utils import setup_logger, parse_candle_data, TokenBucket
+from app.core.deriv_api_otp import get_otp_url
 
 # Setup logger
 logger = setup_logger()
@@ -22,10 +23,10 @@ class DataFetcher:
     def __init__(self, api_token: str, app_id: str = "1089"):
         """
         Initialize DataFetcher
-        
+
         Args:
-            api_token: Deriv API token
-            app_id: Deriv app ID
+            api_token: Deriv API token (PAT format, with pat_ prefix)
+            app_id: Deriv app ID for OTP authentication
         """
         self.api_token = api_token
         self.app_id = app_id
@@ -46,25 +47,19 @@ class DataFetcher:
         self.last_error: Optional[str] = None
     
     async def connect(self) -> bool:
-        """Connect to Deriv WebSocket API"""
+        """Connect to Deriv WebSocket API via OTP authentication"""
         try:
-            logger.info(f"Connecting to Deriv API at {self.ws_url}...")
+            otp_url = await get_otp_url(self.app_id, self.api_token)
+            self.ws_url = otp_url
+            logger.info(f"Connecting to Deriv API via OTP...")
             self.ws = await websockets.connect(
-                self.ws_url,
+                otp_url,
                 ping_interval=30,
                 ping_timeout=10
             )
             self.is_connected = True
             self.reconnect_attempts = 0
-            logger.info("[OK] Connected to Deriv API")
-            
-            # Authorize
-            if not await self.authorize():
-                # last_error is set in authorize()
-                logger.error("[ERROR] Authorization failed during connection")
-                await self.disconnect()
-                return False
-                
+            logger.info("[OK] Connected to Deriv API via OTP")
             return True
             
         except Exception as e:
@@ -122,38 +117,8 @@ class DataFetcher:
             self.is_connected = False
             logger.info("[DISCONNECTED] From Deriv API")
     
-    async def authorize(self) -> bool:
-        """Authorize connection with API token"""
-        try:
-            auth_request = {
-                "authorize": self.api_token
-            }
-            
-            # Acquire rate limit token before sending
-            await self.rate_limiter.acquire()
-            await self.ws.send(json.dumps(auth_request))
-            response = await self.ws.recv()
-            data = json.loads(response)
-            
-            if "error" in data:
-                error_msg = data['error']['message']
-                self.last_error = f"Auth failed: {error_msg}"
-                logger.error(f"❌ AUTH_FAILED | Error: {error_msg}")
-                return False
-            
-            if "authorize" in data:
-                logger.info("[OK] Authorization successful")
-                return True
-            
-            self.last_error = "Unknown auth response"
-            return False
-            
-        except Exception as e:
-            self.last_error = f"Auth exception: {str(e)}"
-            logger.error(f"❌ AUTH_EXCEPTION | Error: {type(e).__name__}: {e}", exc_info=True)
-            return False
-    
-    # Removed old _rate_limit method - now using TokenBucket
+# OTP-based authentication replaces the old authorize flow
+    # Connection is authenticated via the OTP URL itself
     
     async def send_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Send request to API with robust retry logic and rate limiting"""
