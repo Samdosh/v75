@@ -14,6 +14,16 @@ from base_strategy import BaseStrategy
 from indicators import calculate_adx as _default_calculate_adx
 from indicators import calculate_rsi as _default_calculate_rsi
 from utils import setup_logger
+from market_regime import (
+    MarketRegime,
+    detect_market_regime,
+    atr_percentile,
+    get_regime_params,
+    identify_demand_supply_zones,
+    is_dead_market,
+    hybrid_sl_price,
+    hybrid_tp_price,
+)
 
 from . import config as scalping_config
 
@@ -64,6 +74,47 @@ class ScalpingStrategy(BaseStrategy):
 
         # STEP 2/6: 1h directional bias + 5m fresh trigger + 1h structure confirmation
         trend_1h = self._determine_bias(data_1h, "1h", fast_period=20, slow_period=50)
+
+        # ── Dead‑market & regime filter ──────────────────────────────
+        enable_dead = getattr(scalping_config, "SCALPING_ENABLE_DEAD_MARKET_FILTER", True)
+        enable_regime = getattr(scalping_config, "SCALPING_ENABLE_REGIME_ADAPTATION", True)
+        market_regime = MarketRegime.TRENDING
+        regime_params = None
+
+        if enable_dead:
+            dead_pct = getattr(scalping_config, "SCALPING_DEAD_MARKET_ATR_PERCENTILE", 20.0)
+            dead_lb = getattr(scalping_config, "SCALPING_DEAD_MARKET_ATR_LOOKBACK", 100)
+            if is_dead_market(data_5m, percentile_threshold=dead_pct, lookback=dead_lb):
+                _step_log(1, f"Dead market: 5m ATR below {dead_pct:.0f}th percentile")
+                return {
+                    "can_trade": False,
+                    "details": {
+                        "reason": f"Dead market (ATR below {dead_pct:.0f}th percentile)",
+                        "regime": "dead",
+                    },
+                }
+
+        if enable_regime:
+            atr_5m_scalp = self._calculate_atr(data_5m, period=14)
+            atr_pct_val = atr_percentile(
+                data_5m,
+                lookback=getattr(scalping_config, "SCALPING_REGIME_ATR_LOOKBACK", 100),
+            )
+            adx_thresh = getattr(scalping_config, "SCALPING_REGIME_ADX_TREND_THRESHOLD", 25.0)
+            atr_vol = getattr(scalping_config, "SCALPING_REGIME_ATR_VOLATILE_PERCENTILE", 80.0)
+            adx_for_regime = self._calculate_adx_value(data_5m)
+            market_regime = detect_market_regime(
+                adx_for_regime or 25.0,
+                atr_5m_scalp,
+                atr_pct_val,
+                adx_trend_threshold=adx_thresh,
+                atr_volatile_percentile=atr_vol,
+            )
+            regime_params = get_regime_params(
+                market_regime,
+                base_min_rr=float(getattr(scalping_config, "SCALPING_MIN_RR_RATIO", 1.4)),
+            )
+
         trend_5m = self._determine_trend(
             data_5m,
             "5m",
@@ -308,9 +359,23 @@ class ScalpingStrategy(BaseStrategy):
 
         _step_log(4, "Structure gate passed")
 
-        # STEP 5/6: Build TP/SL + validate R:R
-        sl_distance = atr_1m * scalping_config.SCALPING_SL_ATR_MULTIPLIER
-        tp_distance = atr_1m * scalping_config.SCALPING_TP_ATR_MULTIPLIER
+        # STEP 5/6: Build TP/SL + validate R:R (hybrid ATR + structure)
+        enable_hybrid = getattr(scalping_config, "SCALPING_ENABLE_HYBRID_SL_TP", True)
+        enable_zones = getattr(scalping_config, "SCALPING_ENABLE_ZONE_BASED_SL", True)
+
+        sl_mult = scalping_config.SCALPING_SL_ATR_MULTIPLIER
+        tp_mult = scalping_config.SCALPING_TP_ATR_MULTIPLIER
+        sl_min_atr = getattr(scalping_config, "SCALPING_HYBRID_SL_MIN_ATR", 0.5)
+        sl_max_atr = getattr(scalping_config, "SCALPING_HYBRID_SL_MAX_ATR", 2.5)
+        tp_max_atr = getattr(scalping_config, "SCALPING_HYBRID_TP_MAX_ATR", 4.0)
+
+        if regime_params and enable_regime:
+            sl_mult = regime_params.get("sl_atr_mult", sl_mult)
+            sl_max_atr = regime_params.get("sl_atr_mult", sl_max_atr)
+
+        atr_1m = self._calculate_atr(data_1m.iloc[:-1], period=14)
+        sl_distance = atr_1m * sl_mult
+        tp_distance = atr_1m * tp_mult
 
         if direction == "UP":
             sl_price = current_price - sl_distance
@@ -318,6 +383,39 @@ class ScalpingStrategy(BaseStrategy):
         else:
             sl_price = current_price + sl_distance
             tp_price = current_price - tp_distance
+
+        # Hybrid enhancement: snap to structure zones when available
+        if enable_hybrid and matched_zone:
+            zone_level = float(matched_zone["level"])
+            zone_type = str(matched_zone.get("type", ""))
+
+            # For UP: use zone as support (snap SL to zone), for DOWN: resistance
+            if direction == "UP" and zone_type in ("support",):
+                zone_atr_dist = abs(current_price - zone_level) / atr_1m if atr_1m > 0 else 999
+                if sl_min_atr <= zone_atr_dist <= sl_max_atr:
+                    sl_price = hybrid_sl_price(
+                        direction=direction,
+                        current_price=current_price,
+                        atr=atr_1m,
+                        structure_sl=zone_level,
+                        zones=None,
+                        sl_atr_mult=sl_mult,
+                        min_structure_sl_atr=sl_min_atr,
+                        max_sl_atr=sl_max_atr,
+                    )
+            elif direction == "DOWN" and zone_type in ("resistance",):
+                zone_atr_dist = abs(zone_level - current_price) / atr_1m if atr_1m > 0 else 999
+                if sl_min_atr <= zone_atr_dist <= sl_max_atr:
+                    sl_price = hybrid_sl_price(
+                        direction=direction,
+                        current_price=current_price,
+                        atr=atr_1m,
+                        structure_sl=zone_level,
+                        zones=None,
+                        sl_atr_mult=sl_mult,
+                        min_structure_sl_atr=sl_min_atr,
+                        max_sl_atr=sl_max_atr,
+                    )
 
         risk = abs(current_price - sl_price)
         reward = abs(tp_price - current_price)
@@ -327,13 +425,15 @@ class ScalpingStrategy(BaseStrategy):
             return {"can_trade": False, "details": {"reason": "Invalid Stop Loss (Risk=0)"}}
 
         rr_ratio = reward / risk
-        min_rr_ratio = float(getattr(scalping_config, "SCALPING_MIN_RR_RATIO", 1.5))
+        effective_min_rr = float(getattr(scalping_config, "SCALPING_MIN_RR_RATIO", 1.4))
+        if regime_params and enable_regime:
+            effective_min_rr = regime_params.get("min_rr", effective_min_rr)
         rr_tolerance = float(getattr(scalping_config, "SCALPING_RR_TOLERANCE", 1e-6) or 0.0)
-        if rr_ratio + rr_tolerance < min_rr_ratio:
-            _step_log(5, f"Low R:R ({rr_ratio:.2f} < {min_rr_ratio})")
+        if rr_ratio + rr_tolerance < effective_min_rr:
+            _step_log(5, f"Low R:R ({rr_ratio:.2f} < {effective_min_rr})")
             return {
                 "can_trade": False,
-                "details": {"reason": f"Low R:R ({rr_ratio:.2f} < {min_rr_ratio})"},
+                "details": {"reason": f"Low R:R ({rr_ratio:.2f} < {effective_min_rr})"},
             }
 
         _step_log(
@@ -354,7 +454,7 @@ class ScalpingStrategy(BaseStrategy):
             "take_profit": tp_price,
             "stop_loss": sl_price,
             "risk_reward_ratio": rr_ratio,
-            "min_rr_required": min_rr_ratio,
+            "min_rr_required": effective_min_rr,
             "score": confidence,
             "confidence": confidence,
             "entry_price": current_price,
@@ -370,6 +470,8 @@ class ScalpingStrategy(BaseStrategy):
                 "zone_level": zone_level,
                 "zone_type": zone_type,
                 "pa_pattern": pattern,
+                "regime": market_regime.value if enable_regime else "disabled",
+                "regime_min_rr": effective_min_rr,
             },
         }
 
@@ -530,6 +632,17 @@ class ScalpingStrategy(BaseStrategy):
 
         atr = true_range.rolling(period).mean().iloc[-1]
         return atr if not np.isnan(atr) else 0.001
+
+    def _calculate_adx_value(self, df: pd.DataFrame, period: int = 14) -> Optional[float]:
+        if df is None or len(df) < period + 2:
+            return None
+        package_module = import_module("scalping_strategy")
+        calculate_adx = getattr(package_module, "calculate_adx", _default_calculate_adx)
+        adx_series = calculate_adx(df, period=period)
+        if adx_series is None or len(adx_series) == 0:
+            return None
+        val = float(adx_series.iloc[-1])
+        return val if not np.isnan(val) else None
 
     def _is_parabolic_spike(self, df: pd.DataFrame, atr: float) -> bool:
         """

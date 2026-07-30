@@ -18,6 +18,17 @@ from typing import Dict, List, Optional, Tuple, Any
 from . import config
 from utils import setup_logger
 from indicators import calculate_rsi, calculate_adx
+from market_regime import (
+    MarketRegime,
+    detect_market_regime,
+    atr_percentile,
+    get_regime_params,
+    identify_demand_supply_zones,
+    find_nearest_zone,
+    is_dead_market,
+    hybrid_sl_price,
+    hybrid_tp_price,
+)
 
 logger = setup_logger()
 
@@ -107,6 +118,56 @@ class TradingStrategy:
         passed_checks.append("Data Validated")
 
         current_price = data_1m['close'].iloc[-1]
+
+        # ── 0.15  Regime detection & dead‑market filter ─────────────────
+        adx_for_regime = adx_val
+        atr_5m_for_regime = self._calculate_atr(data_5m, period=14)
+
+        market_regime = MarketRegime.TRENDING
+        regime_params = None
+
+        enable_regime = getattr(config, "ENABLE_REGIME_ADAPTATION", True)
+        enable_dead_market = getattr(config, "ENABLE_DEAD_MARKET_FILTER", True)
+
+        if enable_dead_market:
+            dead_market_pct = getattr(config, "DEAD_MARKET_ATR_PERCENTILE", 20.0)
+            dead_market_lookback = getattr(config, "DEAD_MARKET_ATR_LOOKBACK", 100)
+            if is_dead_market(
+                data_5m,
+                percentile_threshold=dead_market_pct,
+                lookback=dead_market_lookback,
+            ):
+                _step_log(
+                    1,
+                    f"Dead market: 5m ATR below {dead_market_pct:.0f}th percentile",
+                    emoji="💤",
+                )
+                response["details"]["reason"] = (
+                    f"Dead market (ATR below {dead_market_pct:.0f}th percentile)"
+                )
+                response["details"]["regime"] = "dead"
+                return response
+            passed_checks.append("Market is active")
+
+        if enable_regime:
+            atr_pct = atr_percentile(
+                data_5m,
+                lookback=getattr(config, "REGIME_ATR_LOOKBACK", 100),
+            )
+            adx_thresh = getattr(config, "REGIME_ADX_TREND_THRESHOLD", 25.0)
+            atr_vol_pct = getattr(config, "REGIME_ATR_VOLATILE_PERCENTILE", 80.0)
+            market_regime = detect_market_regime(
+                adx_for_regime,
+                atr_5m_for_regime,
+                atr_pct,
+                adx_trend_threshold=adx_thresh,
+                atr_volatile_percentile=atr_vol_pct,
+            )
+            regime_params = get_regime_params(market_regime, base_min_rr=config.TOPDOWN_MIN_RR_RATIO)
+            passed_checks.append(
+                f"Regime: {regime_params.get('regime_name', 'Unknown')}"
+                f" (ATR @ {atr_pct:.0f}%ile)"
+            )
 
         # ---------------------------------------------------------
         # 0.1 Indicator Calculation & Pre-Filtering
@@ -372,9 +433,13 @@ class TradingStrategy:
         else:
             rr_ratio = distance_to_tp / distance_to_sl
 
-        if rr_ratio < self.min_rr_ratio:
-            _step_log(5, f"R:R too low: 1:{rr_ratio:.2f} < 1:{self.min_rr_ratio}", emoji="⚠️")
-            response["details"]["reason"] = f"Poor R:R Ratio ({rr_ratio:.2f} < {self.min_rr_ratio})"
+        effective_min_rr = self.min_rr_ratio
+        if regime_params and enable_regime:
+            effective_min_rr = regime_params.get("min_rr", self.min_rr_ratio)
+
+        if rr_ratio < effective_min_rr:
+            _step_log(5, f"R:R too low: 1:{rr_ratio:.2f} < 1:{effective_min_rr}", emoji="⚠️")
+            response["details"]["reason"] = f"Poor R:R Ratio ({rr_ratio:.2f} < {effective_min_rr})"
             response["take_profit"] = target_level
             response["stop_loss"] = sl_level
             response["risk_reward_ratio"] = round(rr_ratio, 2)
@@ -420,7 +485,9 @@ class TradingStrategy:
             "magnet_target": is_magnet,
             "passed_checks": passed_checks,
             "rsi": round(rsi_val, 2),
-            "adx": round(adx_val, 2)
+            "adx": round(adx_val, 2),
+            "regime": market_regime.value if enable_regime else "disabled",
+            "regime_min_rr": effective_min_rr,
         }
 
         _step_log(
@@ -557,114 +624,111 @@ class TradingStrategy:
                                data_5m: pd.DataFrame,
                                symbol: Optional[str] = None) -> Tuple[Optional[float], Optional[float]]:
         """
-        TP: Nearest Structure Level (Tested or Untested).
-        SL: Price behind last Swing Point (Prioritize 1H -> 4H -> Daily).
+        Hybrid TP/SL identification:
+
+        TP  → Nearest structure level capped by ATR × HYBRID_TP_MAX_ATR_MULT
+               Fall back to ATR‑based distance if no valid structure level exists.
+        SL  → Zone‑clustered swing points (5M → 1H → 4H → Daily) validated
+               against ATR‑based maximum distance.
         """
+        enable_hybrid_sl = getattr(config, "ENABLE_HYBRID_SL", True)
+        enable_hybrid_tp = getattr(config, "ENABLE_HYBRID_TP", True)
+        enable_zones = getattr(config, "ENABLE_ZONE_BASED_SL", True)
+        zone_proximity = getattr(config, "ZONE_PROXIMITY_PCT", 0.0015)
+        sl_min_atr = getattr(config, "HYBRID_SL_MIN_ATR_MULT", 0.5)
+        sl_max_atr = getattr(config, "HYBRID_SL_MAX_ATR_MULT", 2.5)
+        tp_max_atr = getattr(config, "HYBRID_TP_MAX_ATR_MULT", 4.0)
+
+        # Use regime‑adjusted params when available
+        if hasattr(self, "_regime_params") and self._regime_params:
+            sl_max_atr = self._regime_params.get("sl_atr_mult", sl_max_atr)
+            max_sl_pct = self._regime_params.get("max_sl_distance_pct", self.max_sl_distance_pct)
+        else:
+            max_sl_pct = self.max_sl_distance_pct
+
+        atr_5m = self._calculate_atr(data_5m, period=14) or 0.001
         target = None
         stop = None
 
-        # Filter levels by direction
+        # ── 1.  Target (TP)  ──────────────────────────────────────────
         if direction == "UP":
-            # Target: Levels ABOVE current price
-            potential_tps = [l for l in levels if l['price'] > current_price]
-            # Sort by proximity
-            potential_tps.sort(key=lambda x: x['price'])
-            
-            # Prioritize NEAREST level that satisfies min distance
-            if potential_tps:
-                # Default to None, look for valid level
-                for level in potential_tps:
-                    dist_pct = abs(level['price'] - current_price) / current_price * 100
-                    if dist_pct >= config.MIN_TP_DISTANCE_PCT:
-                        target = level['price']
-                        break
-                
-                # If all levels are too close, we might want to default to the furthest one 
-                # or just leave as None (no valid target).
-                # Logic: If we have levels but all are < 0.2%, maybe the volatility is super low.
-                # Let's fallback to the last (furthest) one if nothing qualified, 
-                # effectively targeting the "next" available if we ran out.
-                # However, strict adherence says we skip "too close". 
-                # If everything is too close, we shouldn't trade.
-                pass
+            potential_tps = [l for l in levels if l["price"] > current_price]
+            potential_tps.sort(key=lambda x: x["price"])
+        else:
+            potential_tps = [l for l in levels if l["price"] < current_price]
+            potential_tps.sort(key=lambda x: x["price"], reverse=True)
 
-            # SL: Last Swing Low BELOW current price (5M -> 1H -> 4H -> Daily)
-            # Try 5M first (Scalping precision)
-            h, l = self._get_swing_points(data_5m)
-            valid = [x for x in l if x < current_price]
-            if valid:
-                stop = valid[-1]
+        structure_tp: Optional[float] = None
+        for level in potential_tps:
+            dist_pct = abs(level["price"] - current_price) / current_price * 100
+            if dist_pct >= config.MIN_TP_DISTANCE_PCT:
+                structure_tp = level["price"]
+                break
 
-            if not stop:
-                # Try 1H
-                h, l = self._get_swing_points(data_1h)
-                valid = [x for x in l if x < current_price]
-                if valid:
-                    stop = valid[-1]
-            
-            if not stop:
-                # Try 4H
-                h, l = self._get_swing_points(data_4h)
-                valid = [x for x in l if x < current_price]
-                if valid:
-                    stop = valid[-1]
-            
-            if not stop:
-                # Fallback to Daily
-                h, l = self._get_swing_points(daily_data)
-                valid = [x for x in l if x < current_price]
-                if valid:
-                    stop = valid[-1]
+        if enable_hybrid_tp:
+            target = hybrid_tp_price(
+                direction=direction,
+                current_price=current_price,
+                atr=atr_5m,
+                structure_tp=structure_tp,
+                tp_atr_mult=3.0,
+                max_tp_atr=tp_max_atr,
+                min_tp_distance_pct=config.MIN_TP_DISTANCE_PCT,
+                tp_buffer_pct=config.TP_BUFFER_PCT,
+            )
+        else:
+            target = structure_tp
 
-        else: # DOWN
-            # Target: Levels BELOW current price
-            potential_tps = [l for l in levels if l['price'] < current_price]
-            # Sort by proximity (descending)
-            potential_tps.sort(key=lambda x: x['price'], reverse=True)
-            
-            # Prioritize NEAREST level that satisfies min distance
-            if potential_tps:
-                for level in potential_tps:
-                    dist_pct = abs(level['price'] - current_price) / current_price * 100
-                    if dist_pct >= config.MIN_TP_DISTANCE_PCT:
-                        target = level['price']
-                        break
+        # ── 2.  Stop‑Loss (SL)  ───────────────────────────────────────
+        # Collect swing points across timeframes for zone detection
+        all_swing_points: List[float] = []
 
-            # SL: Last Swing High ABOVE current price (5M -> 1H -> 4H -> Daily)
-            # Try 5M first
-            h, l = self._get_swing_points(data_5m)
-            valid = [x for x in h if x > current_price]
-            if valid:
-                stop = valid[-1]
+        swing_cascade = [
+            ("5m", data_5m),
+            ("1h", data_1h),
+            ("4h", data_4h),
+            ("daily", daily_data),
+        ]
 
-            if not stop:
-                # Try 1H
-                h, l = self._get_swing_points(data_1h)
-                valid = [x for x in h if x > current_price]
-                if valid:
-                    stop = valid[-1]
-            
-            if not stop:
-                # Try 4H
-                h, l = self._get_swing_points(data_4h)
-                valid = [x for x in h if x > current_price]
-                if valid:
-                    stop = valid[-1]
-            
-            if not stop:
-                # Fallback to Daily
-                h, l = self._get_swing_points(daily_data)
-                valid = [x for x in h if x > current_price]
-                if valid:
-                    stop = valid[-1]
+        structure_sl: Optional[float] = None
+        for tf_name, tf_data in swing_cascade:
+            h, l = self._get_swing_points(tf_data)
+            if direction == "UP":
+                points = [x for x in l if x < current_price]
+                all_swing_points.extend(l)
+                if points and structure_sl is None:
+                    structure_sl = points[-1]
+            else:
+                points = [x for x in h if x > current_price]
+                all_swing_points.extend(h)
+                if points and structure_sl is None:
+                    structure_sl = points[-1]
 
-        if stop:
-            dist_pct = abs(current_price - stop) / current_price * 100
-            
-            if dist_pct > self.max_sl_distance_pct:
-                _step_log(4, f"SL too wide ({dist_pct:.2f}% > {self.max_sl_distance_pct}%)", emoji="❌")
-                stop = None
-                
+        # Build zones for zone‑based SL
+        zones: Optional[List[Dict]] = None
+        if enable_zones and all_swing_points:
+            zones = identify_demand_supply_zones(all_swing_points, zone_proximity)
+
+        # Validate raw structure SL distance
+        if structure_sl is not None:
+            dist_pct = abs(current_price - structure_sl) / current_price * 100
+            if dist_pct > max_sl_pct:
+                structure_sl = None
+
+        if enable_hybrid_sl:
+            stop = hybrid_sl_price(
+                direction=direction,
+                current_price=current_price,
+                atr=atr_5m,
+                structure_sl=structure_sl,
+                zones=zones,
+                sl_atr_mult=2.0,
+                min_structure_sl_atr=sl_min_atr,
+                max_sl_atr=sl_max_atr,
+            )
+        else:
+            stop = structure_sl
+
         return target, stop
 
     def _find_trading_range(self, levels: List[Dict], current_price: float) -> Tuple[Optional[float], Optional[float]]:
@@ -897,6 +961,19 @@ class TradingStrategy:
             response["details"]["reason"] = "Insufficient data across W1, D1, M15 timeframes"
             return response
 
+        # ── 0.1  Dead‑market filter (same as main path) ────────────────
+        enable_dead = getattr(config, "ENABLE_DEAD_MARKET_FILTER", True)
+        if enable_dead and data_5m is not None and not data_5m.empty:
+            dead_pct = getattr(config, "DEAD_MARKET_ATR_PERCENTILE", 20.0)
+            dead_lb = getattr(config, "DEAD_MARKET_ATR_LOOKBACK", 100)
+            if is_dead_market(data_5m, percentile_threshold=dead_pct, lookback=dead_lb):
+                _step_log(1, f"Dead market: 5m ATR below {dead_pct:.0f}th percentile", emoji="💤")
+                response["details"]["reason"] = (
+                    f"Dead market (ATR below {dead_pct:.0f}th percentile)"
+                )
+                response["details"]["regime"] = "dead"
+                return response
+
         passed_checks.append("Data Validated")
         current_price = data_15m['close'].iloc[-1]
 
@@ -1106,14 +1183,33 @@ class TradingStrategy:
             response["details"]["reason"] = "No next zone found for Take Profit"
             return response
 
-        # ── 5. R:R validation ──────────────────────────────────────────
+        # ── 5. R:R validation (regime‑adjusted) ─────────────────────────
         distance_to_tp = abs(target_level - current_price)
         distance_to_sl = abs(current_price - sl_price)
 
         rr_ratio = (distance_to_tp / distance_to_sl) if distance_to_sl > 0 else 0.0
 
-        if rr_ratio < self.min_rr_ratio:
-            response["details"]["reason"] = f"Poor R:R Ratio ({rr_ratio:.2f} < {self.min_rr_ratio})"
+        effective_min_rr = self.min_rr_ratio
+        enable_regime = getattr(config, "ENABLE_REGIME_ADAPTATION", True)
+        if enable_regime and data_5m is not None and not data_5m.empty:
+            atr_5m_fb = self._calculate_atr(data_5m, period=14) or 0.001
+            atr_pct_fb = atr_percentile(data_5m, lookback=getattr(config, "REGIME_ATR_LOOKBACK", 100))
+            adx_thresh = getattr(config, "REGIME_ADX_TREND_THRESHOLD", 25.0)
+            atr_vol_pct = getattr(config, "REGIME_ATR_VOLATILE_PERCENTILE", 80.0)
+            try:
+                adx_5m = float(calculate_adx(data_5m).iloc[-1]) if not data_5m.empty else 25.0
+            except Exception:
+                adx_5m = 25.0
+            fb_regime = detect_market_regime(
+                adx_5m, atr_5m_fb, atr_pct_fb,
+                adx_trend_threshold=adx_thresh,
+                atr_volatile_percentile=atr_vol_pct,
+            )
+            fb_params = get_regime_params(fb_regime, base_min_rr=self.min_rr_ratio)
+            effective_min_rr = fb_params.get("min_rr", self.min_rr_ratio)
+
+        if rr_ratio < effective_min_rr:
+            response["details"]["reason"] = f"Poor R:R Ratio ({rr_ratio:.2f} < {effective_min_rr})"
             response["take_profit"] = target_level
             response["stop_loss"] = sl_price
             response["risk_reward_ratio"] = round(rr_ratio, 2)

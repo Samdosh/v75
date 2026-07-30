@@ -244,6 +244,35 @@ MIN_TP_DISTANCE_PCT = 0.2          # Minimum TP distance from entry
 MAX_ENTRY_DISTANCE_PCT = 0.5       # Max distance from level to entry (prevents chasing)
 ALLOW_MIDDLE_ZONE_WITH_BREAKOUT = True  # Allow middle zone entry IF strong momentum breakout
 
+# ==================== MARKET REGIME DETECTION ====================
+# Classify the current market as trending / ranging / volatile to
+# dynamically adjust SL/TP multipliers and risk parameters.
+ENABLE_REGIME_ADAPTATION = True
+REGIME_ADX_TREND_THRESHOLD = 25.0      # ADX >= threshold → trending
+REGIME_ATR_VOLATILE_PERCENTILE = 80.0  # ATR >= 80th %ile → volatile
+REGIME_ATR_LOOKBACK = 100              # Candles for percentile calculation
+
+# ==================== DEAD MARKET FILTER ====================
+# Skip entries when the current 5m ATR is below a historical
+# percentile threshold (low‑volatility markets lack follow‑through).
+ENABLE_DEAD_MARKET_FILTER = True
+DEAD_MARKET_ATR_PERCENTILE = 20.0      # Skip if ATR < 20th percentile
+DEAD_MARKET_ATR_LOOKBACK = 100         # Candles for historical distribution
+
+# ==================== ZONE‑BASED SL ====================
+# Group nearby swing points into supply/demand zones.
+# SL is placed just beyond the entire zone (not a single level).
+ENABLE_ZONE_BASED_SL = True
+ZONE_PROXIMITY_PCT = 0.0015            # 0.15% max distance to merge points
+
+# ==================== HYBRID SL/TP ====================
+# Combine ATR‑based and structure‑based levels for SL and TP.
+ENABLE_HYBRID_SL = True                # Use ATR cap on structure SL
+ENABLE_HYBRID_TP = True                # Use ATR cap on structure TP
+HYBRID_SL_MIN_ATR_MULT = 0.5           # Min SL distance from entry (ATR×)
+HYBRID_SL_MAX_ATR_MULT = 2.5           # Cap structure SL at this ATR multiple
+HYBRID_TP_MAX_ATR_MULT = 4.0           # Don't target structure beyond 4× ATR
+
 # ==================== LATE ENTRY PREVENTION ====================
 # Maximum price movement before entry (percentage)
 MAX_PRICE_MOVEMENT_PCT = 0.5       # Reject if price moved > 0.5% already (~150 pips on R_75)
