@@ -23,7 +23,8 @@ def test_external_strategy_metadata():
     strategy = ScalpingStrategy()
     assert strategy.get_strategy_name() == "Scalping"
     assert strategy.get_required_timeframes() == ["1h", "5m", "1m"]
-    assert "1HZ90V" in strategy.get_symbols()
+    assert "1HZ90V" not in strategy.get_symbols()
+    assert "1HZ90V" in strategy.blocked_symbols
 
 
 def test_external_analyze_missing_data():

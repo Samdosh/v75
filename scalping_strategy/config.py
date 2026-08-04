@@ -5,8 +5,9 @@ All scalping-specific constants and thresholds
 
 # Dedicated symbol universe for scalping (kept local for independence).
 # 1HZ100V and 1HZ30V are intentionally blocked and must never be traded.
-BLOCKED_SYMBOLS = {"1HZ100V", "1HZ30V", "R_100", "1HZ50V","R_50"}
-SYMBOLS = ["R_25", "R_75", "1HZ25V", "1HZ75V", "1HZ90V", "stpRNG5", "stpRNG4"]
+# 1HZ90V removed: Deriv does not offer multiplier trading on this asset.
+BLOCKED_SYMBOLS = {"1HZ100V", "1HZ30V", "R_100", "1HZ50V", "R_50", "1HZ90V"}
+SYMBOLS = ["R_25", "R_75", "1HZ25V", "1HZ75V", "stpRNG5", "stpRNG4"]
 
 # Empty rollout list means: trade full scalping symbol universe.
 SCALPING_ROLLOUT_SYMBOLS = []
@@ -61,13 +62,6 @@ ASSET_CONFIG = {
         "tick_size": 0.01,
         "movement_threshold_pct": 1.2,
         "entry_distance_pct": 1.2,
-    },
-    "1HZ90V": {
-        "multiplier": 45,
-        "description": "Volatility 90 (1s) Index",
-        "tick_size": 0.01,
-        "movement_threshold_pct": 1.3,
-        "entry_distance_pct": 1.3,
     },
     "stpRNG5": {
         "multiplier": 100,
@@ -131,7 +125,6 @@ SCALPING_DOWN_ALLOWED_SYMBOLS = {"R_75", "stpRNG5"}
 SCALPING_SYMBOL_ADX_OVERRIDES = {
     "1HZ75V": {"DOWN": 50, "UP": 25},
     "1HZ25V": {"DOWN": 25, "UP": 25},
-    "1HZ90V": {"UP": 20},
     # Strict stpRNG4 trend-quality requirement.
     "stpRNG4": {"UP": 35, "DOWN": 40},
 }
