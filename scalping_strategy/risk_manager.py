@@ -109,6 +109,9 @@ class ScalpingRiskManager(BaseRiskManager):
         self._trade_metadata: Dict[str, Dict] = {}
         self._trailing_state: Dict[str, Dict] = {}
 
+        # Closed-trade records for today (compat surface for standalone bot/telegram)
+        self._closed_trades_today: list = []
+
         # Runaway trade protection
         self.recent_trade_timestamps: List[datetime] = []
 
@@ -894,6 +897,7 @@ class ScalpingRiskManager(BaseRiskManager):
         """Get current statistics dictionary."""
         return {
             "total_trades": self.daily_trade_count,
+            "trades_today": self.daily_trade_count,
             "total_pnl": self.daily_pnl,
             "daily_pnl": self.daily_pnl,
             "win_rate": 0.0,
@@ -901,6 +905,39 @@ class ScalpingRiskManager(BaseRiskManager):
             "down_trades": self.daily_down_trade_count,
             "up_trades": self.daily_up_trade_count,
         }
+
+    @property
+    def total_trades(self) -> int:
+        """Compatibility alias for the legacy runner/standalone bot."""
+        return self.daily_trade_count
+
+    @property
+    def trades_today(self) -> list:
+        """Compatibility alias returning a list of closed trade records."""
+        return list(getattr(self, "_closed_trades_today", []))
+
+    def validate_trade_parameters(
+        self, symbol: str = None, stake: float = None, **kwargs
+    ) -> tuple:
+        """
+        Compatibility shim for the standalone bot (main.py).
+
+        Delegates to can_open_trade when a symbol is provided; otherwise just
+        confirms the daily trade budget has headroom.
+        """
+        if symbol:
+            try:
+                can_open, msg = self.can_open_trade(
+                    symbol,
+                    stake or self.stake,
+                    kwargs.get("take_profit"),
+                    kwargs.get("stop_loss"),
+                    kwargs.get("signal_dict"),
+                )
+                return can_open, msg
+            except Exception as e:
+                logger.warning(f"[SCALPING] validate_trade_parameters fallback: {e}")
+        return self.can_trade(symbol)
 
     @property
     def has_active_trade(self) -> bool:
@@ -1081,6 +1118,27 @@ class ScalpingRiskManager(BaseRiskManager):
 
         # Update P&L
         self.daily_pnl += profit
+
+        # Record closed trade for today (compat with standalone bot/telegram)
+        try:
+            self._closed_trades_today.append(
+                {
+                    "contract_id": contract_id,
+                    "profit": profit,
+                    "pnl": profit,
+                    "status": normalized_status,
+                    "symbol": symbol,
+                    "exit_type": "take_profit" if normalized_status in ("win", "profit") else "stop_loss",
+                    "closed_at": now,
+                }
+            )
+            today = now.date()
+            self._closed_trades_today = [
+                t for t in self._closed_trades_today
+                if isinstance(t.get("closed_at"), datetime) and t["closed_at"].date() == today
+            ]
+        except Exception as e:
+            logger.warning(f"[SCALPING] Could not append closed-trade record: {e}")
 
         if normalized_status == "loss":
             self.consecutive_losses += 1

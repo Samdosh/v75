@@ -137,6 +137,20 @@ class ConservativeRiskManager(BaseRiskManager):
         """
         return self.risk_manager.get_cooldown_remaining()
 
+    def get_statistics(self) -> Dict:
+        """Delegate statistics reporting to the wrapped risk manager."""
+        return self.risk_manager.get_statistics()
+
+    @property
+    def total_trades(self) -> int:
+        """Expose total trade count from the wrapped risk manager."""
+        return getattr(self.risk_manager, "total_trades", 0)
+
+    @property
+    def trades_today(self) -> list:
+        """Expose today's trade records from the wrapped risk manager."""
+        return getattr(self.risk_manager, "trades_today", [])
+
     def should_close_trade(
         self,
         contract_id: str,

@@ -32,6 +32,64 @@ from market_regime import (
 
 logger = setup_logger()
 
+
+def calculate_stake_from_sl(
+    capital: float,
+    entry_price: float,
+    stop_loss: float,
+    multiplier: float = 50.0,
+    unit: float = 0.01,
+) -> float:
+    """
+    Compute the trade stake using the gold-style lot formula.
+
+    FORMULA (user-defined, exact port of the gold bot):
+    1. capital <= $50       -> risk budget = capital / 5
+    2. $50 < capital < $100 -> risk budget = capital / 7
+    3. capital >= $100      -> risk budget = capital / 10
+
+    risk_per_unit = SL distance  (gold: 0.01 unit -> $1 per $1 move)
+    units         = floor(risk_budget / risk_per_unit)   # always round DOWN
+    stake         = units * unit
+
+    Returns 0 (skip trade) if stake < unit.
+    """
+    if not capital or capital <= 0:
+        return 0.0
+    if not entry_price or entry_price <= 0:
+        return 0.0
+    if not stop_loss or stop_loss <= 0:
+        return 0.0
+
+    import math
+
+    # 1. Determine capital bracket divisor
+    if capital <= 50:
+        divisor = 5
+    elif capital < 100:
+        divisor = 7
+    else:
+        divisor = 10
+
+    risk_budget = capital / divisor
+
+    # 2. Risk of a single unit stake at this SL (gold: 0.01 -> $1 per $1 move)
+    sl_distance = abs(entry_price - stop_loss)
+    risk_per_unit = sl_distance
+
+    if risk_per_unit <= 0:
+        return 0.0
+
+    # 3. Units that fit in the risk budget (round DOWN)
+    stake = math.floor(risk_budget / risk_per_unit) * unit
+
+    # 4. Skip if below the minimum unit
+    if stake < unit:
+        return 0.0
+
+    return round(stake, 2)
+
+
 class TradingStrategy:
     """
     Implements Top-Down Market Structure Analysis.
@@ -87,7 +145,11 @@ class TradingStrategy:
 
         _step_log(1, "Starting analysis", emoji="🔎")
 
-        if not self._check_data_freshness(data_15m):
+        # 15m candles are stamped at bucket start, so the last candle can be up
+        # to one full 15m period old even when perfectly fresh. Use a
+        # timeframe-appropriate staleness window instead of the 1m/5m default.
+        max_15m_age = getattr(config, "MAX_STALE_15M_SECONDS", 15 * 60 + 120)
+        if not self._check_data_freshness(data_15m, max_age_seconds=max_15m_age):
             response["details"]["reason"] = "Stale 15m data"
             return response
 
@@ -118,6 +180,19 @@ class TradingStrategy:
         passed_checks.append("Data Validated")
 
         current_price = data_1m['close'].iloc[-1]
+
+        # ── 0.1 Indicator Calculation & Pre-Filtering ─────────────────
+        # Computed here so regime detection / dead-market filter below can
+        # safely reference rsi_val / adx_val.
+        try:
+            rsi_val = calculate_rsi(data_5m).iloc[-1] if not data_5m.empty else 50
+            adx_val = calculate_adx(data_5m).iloc[-1] if not data_5m.empty else 0
+            if pd.isna(adx_val): adx_val = 0
+            passed_checks.append("Indicators Calculated")
+        except Exception as e:
+            logger.error(f"[CONSERVATIVE][{symbol}] ❌ Indicator calculation failed: {e}")
+            rsi_val = 50
+            adx_val = 0
 
         # ── 0.15  Regime detection & dead‑market filter ─────────────────
         adx_for_regime = adx_val
@@ -168,19 +243,6 @@ class TradingStrategy:
                 f"Regime: {regime_params.get('regime_name', 'Unknown')}"
                 f" (ATR @ {atr_pct:.0f}%ile)"
             )
-
-        # ---------------------------------------------------------
-        # 0.1 Indicator Calculation & Pre-Filtering
-        # ---------------------------------------------------------
-        try:
-            rsi_val = calculate_rsi(data_5m).iloc[-1] if not data_5m.empty else 50
-            adx_val = calculate_adx(data_5m).iloc[-1] if not data_5m.empty else 0
-            if pd.isna(adx_val): adx_val = 0
-            passed_checks.append("Indicators Calculated")
-        except Exception as e:
-            logger.error(f"[CONSERVATIVE][{symbol}] ❌ Indicator calculation failed: {e}")
-            rsi_val = 50
-            adx_val = 0
 
         # ADX Filter (Trend Strength)
         if adx_val < config.ADX_THRESHOLD:
@@ -513,7 +575,7 @@ class TradingStrategy:
 
         up_count = 0
         down_count = 0
-        for i in range(1, min(4, len(highs))):
+        for i in range(1, min(4, len(highs), len(lows))):
             if highs[-i] > highs[-i-1]:
                 up_count += 1
             else:

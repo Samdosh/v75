@@ -63,6 +63,20 @@ USE_TOPDOWN_STRATEGY = True        # Active Strategy
 
 FIXED_STAKE = None               # NO DEFAULT - STRICTLY USER DEFINED
 
+# Allow .env to supply the fixed stake (e.g. FIXED_STAKE=5.0)
+try:
+    _env_stake = os.getenv("FIXED_STAKE")
+    if _env_stake is not None and _env_stake.strip() != "":
+        FIXED_STAKE = float(_env_stake)
+except (TypeError, ValueError):
+    FIXED_STAKE = None
+
+# Dynamic SL-based stake (gold-style lot formula) using live account balance.
+# When enabled, overrides FIXED_STAKE per signal.
+USE_SL_BASED_STAKE = True
+# Minimum stake unit / step (0.01 as user-confirmed).
+STAKE_UNIT = 0.01
+
 # Maximum Risk (Percentage of Stake)
 MAX_RISK_PCT = 50.0                # Never risk more than 50% of stake
 
@@ -102,6 +116,9 @@ CANDLES_15M = 150
 MAX_RETRIES = 3
 RETRY_DELAY = 2
 MAX_STALE_DATA_SECONDS = 120
+# 15m candles are stamped at bucket start: allow one full 15m period plus
+# fetch/reconnect buffer before considering the candle stale.
+MAX_STALE_15M_SECONDS = 15 * 60 + 120
 
 # ==================== STRATEGY PARAMETERS ====================
 # ATR Validation Ranges (can be asset-specific if needed)

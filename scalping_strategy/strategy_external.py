@@ -452,6 +452,11 @@ class ScalpingStrategy(BaseStrategy):
         """Return scalping symbol universe."""
         return list(scalping_config.SYMBOLS)
 
+    @property
+    def blocked_symbols(self):
+        """Symbols that must never be traded by this strategy."""
+        return set(scalping_config.BLOCKED_SYMBOLS)
+
     def get_asset_config(self) -> Dict:
         """Return scalping asset configuration."""
         return dict(scalping_config.ASSET_CONFIG)

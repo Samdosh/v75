@@ -7,6 +7,7 @@ data_fetcher.py - MULTI-ASSET VERSION
 import asyncio
 import websockets
 import json
+import time
 import pandas as pd
 from typing import Dict, List, Optional, Any
 from datetime import datetime
@@ -35,6 +36,8 @@ class DataFetcher:
         self.is_connected = False
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 5
+        self._reconnect_reset_time = 0.0
+        self._reconnect_cooldown = 120.0
         
         # Rate limiting - TokenBucket allows 10 req/s with burst capacity of 20
         self.rate_limiter = TokenBucket(rate=10.0, capacity=20.0)
@@ -54,8 +57,8 @@ class DataFetcher:
             logger.info(f"Connecting to Deriv API via OTP...")
             self.ws = await websockets.connect(
                 otp_url,
-                ping_interval=30,
-                ping_timeout=10
+                ping_interval=None,
+                ping_timeout=None
             )
             self.is_connected = True
             self.reconnect_attempts = 0
@@ -73,10 +76,16 @@ class DataFetcher:
     async def reconnect(self) -> bool:
         """Attempt to reconnect to the API"""
         self.reconnect_attempts += 1
-        
+
         if self.reconnect_attempts > self.max_reconnect_attempts:
-            logger.error(f"[ERROR] Max reconnection attempts ({self.max_reconnect_attempts}) reached")
-            return False
+            now = time.monotonic()
+            if now - self._reconnect_reset_time >= self._reconnect_cooldown:
+                self.reconnect_attempts = 0
+                self._reconnect_reset_time = now
+                logger.warning("[RECONNECT] Cooldown elapsed, resetting reconnect counter")
+            else:
+                logger.error(f"[ERROR] Max reconnection attempts ({self.max_reconnect_attempts}) reached")
+                return False
         
         logger.warning(f"[RECONNECT] Attempt {self.reconnect_attempts}/{self.max_reconnect_attempts}")
         

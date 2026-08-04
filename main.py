@@ -19,6 +19,7 @@ from data_fetcher import DataFetcher
 from strategy import TradingStrategy
 from trade_engine import TradeEngine
 from risk_manager import RiskManager
+from strategy_registry import get_strategy, normalize_strategy_name
 
 # Setup logger
 logger = setup_logger(config.LOG_FILE, config.LOG_LEVEL)
@@ -55,7 +56,12 @@ class TradingBot:
             "bot_state.json"
         )
         self._last_heartbeat = datetime.now()
-        
+
+        # Active strategy (Conservative | Scalping | RiseFall)
+        self.active_strategy = normalize_strategy_name(
+            os.getenv("ACTIVE_STRATEGY", "Conservative")
+        )
+
         # Multi-asset tracking
         self.symbols = config.get_all_symbols()
         self.asset_signals: Dict[str, Optional[Dict]] = {symbol: None for symbol in self.symbols}
@@ -98,10 +104,33 @@ class TradingBot:
                 config.DERIV_API_TOKEN_RAW or config.DERIV_API_TOKEN,
                 config.DERIV_APP_ID
             )
-            
-            self.strategy = TradingStrategy()
-            self.risk_manager = RiskManager()
-            
+
+            # Strategy-aware instantiation (Conservative / Scalping / RiseFall)
+            strategy_class, risk_manager_class = get_strategy(
+                self.active_strategy, respect_feature_flags=True
+            )
+            self.strategy = strategy_class()
+            self.risk_manager = risk_manager_class()
+
+            # Scope symbols/asset config to the active strategy when available
+            if hasattr(self.strategy, "get_symbols"):
+                strat_symbols = self.strategy.get_symbols()
+                if strat_symbols:
+                    self.symbols = list(strat_symbols)
+                    self.asset_signals = {s: None for s in self.symbols}
+            if hasattr(self.strategy, "get_asset_config"):
+                strat_assets = self.strategy.get_asset_config()
+                if strat_assets:
+                    self.trade_engine.configure_assets(
+                        asset_configs=strat_assets,
+                        blocked_symbols=getattr(self.strategy, "blocked_symbols", None),
+                    )
+            if hasattr(self.risk_manager, "update_risk_settings") and config.FIXED_STAKE:
+                try:
+                    self.risk_manager.update_risk_settings(config.FIXED_STAKE)
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not apply fixed stake: {e}")
+
             # Connect to API
             logger.info("🔌 Connecting to Deriv API...")
             
@@ -126,19 +155,31 @@ class TradingBot:
             # Log trading parameters
             logger.info("="*60)
             
-            strategy_mode = "TOP-DOWN MULTI-TIMEFRAME" if config.USE_TOPDOWN_STRATEGY else "TWO-PHASE SCALPING"
-            logger.info(f"TRADING PARAMETERS - {strategy_mode}")
+            strategy_display = self.strategy.get_strategy_name() if hasattr(self.strategy, "get_strategy_name") else "Conservative"
+            logger.info(f"TRADING PARAMETERS - {strategy_display.upper()}")
             logger.info("="*60)
             logger.info(f"📊 Assets Monitored: {len(self.symbols)}")
+            strat_assets = {}
+            if hasattr(self.strategy, "get_asset_config"):
+                try:
+                    strat_assets = self.strategy.get_asset_config() or {}
+                except Exception:
+                    strat_assets = {}
             for symbol in self.symbols:
-                asset_info = config.get_asset_info(symbol)
-                logger.info(f"   • {symbol}: {asset_info['multiplier']}x ({asset_info['description']})")
+                asset_info = strat_assets.get(symbol) or config.ASSET_CONFIG.get(symbol, {})
+                mult = asset_info.get('multiplier', '?')
+                desc = asset_info.get('description', symbol)
+                logger.info(f"   • {symbol}: {mult}x ({desc})")
             
             stake_display = format_currency(config.FIXED_STAKE) if config.FIXED_STAKE else "USER_DEFINED"
             logger.info(f"💵 Stake: {stake_display}")
             logger.info(f"🎯 Max Concurrent Trades: {config.MAX_CONCURRENT_TRADES}")
             
-            if config.USE_TOPDOWN_STRATEGY:
+            if self.active_strategy == "Scalping":
+                logger.info(f"📈 Strategy: Scalping (1h/5m/1m multi-timeframe)")
+                logger.info(f"🎯 Min R:R Ratio: 1:{getattr(config, 'SCALPING_MIN_RR_RATIO', 1.4)}")
+                logger.info(f"💰 Dynamic TP/SL: ATR-based")
+            elif config.USE_TOPDOWN_STRATEGY:
                 logger.info(f"📈 Strategy: Top-Down Multi-Timeframe Analysis")
                 logger.info(f"📊 Timeframes: 1w, 1d, 4h, 1h, 5m, 1m")
                 logger.info(f"🎯 Min R:R Ratio: 1:{config.TOPDOWN_MIN_RR_RATIO}")
@@ -220,55 +261,55 @@ class TradingBot:
         try:
             logger.info(f"📊 Analyzing {symbol}...")
             
-            if config.USE_TOPDOWN_STRATEGY:
-                # Fetch all timeframes for Top-Down analysis
-                all_timeframes = await self.data_fetcher.fetch_all_timeframes(symbol)
-                
-                if not all_timeframes:
-                    logger.warning(f"⚠️ Failed to fetch data for {symbol}")
-                    return None
-                
-                fetched_tfs = list(all_timeframes.keys())
-                logger.debug(f"   Fetched timeframes: {', '.join(fetched_tfs)}")
-                
-                # Analyze with all available timeframes
-                signal = self.strategy.analyze(
-                    data_1m=all_timeframes.get('1m'),
-                    data_5m=all_timeframes.get('5m'),
-                    data_1h=all_timeframes.get('1h'),
-                    data_4h=all_timeframes.get('4h'),
-                    data_1d=all_timeframes.get('1d'),
-                    data_1w=all_timeframes.get('1w'),
-                    symbol=symbol  # Pass symbol for asset-specific filtering
-                )
-            else:
-                # Legacy: Use 1m+5m only
-                market_data = await self.data_fetcher.fetch_multi_timeframe_data(symbol)
-                
-                if '1m' not in market_data or '5m' not in market_data:
-                    logger.warning(f"⚠️ Failed to fetch complete data for {symbol}")
-                    return None
-                
-                # Legacy mode: analyze with 1m+5m (pass None for missing timeframes)
-                signal = self.strategy.analyze(
-                    data_1m=market_data['1m'],
-                    data_5m=market_data['5m'],
-                    data_1h=None,
-                    data_4h=None,
-                    data_1d=None,
-                    data_1w=None,
-                    symbol=symbol
-                )
+            # Determine which timeframes this strategy needs
+            required_tfs = ["1m", "5m", "15m", "1h", "4h", "1d", "1w"]
+            if hasattr(self.strategy, "get_required_timeframes"):
+                try:
+                    strat_tfs = self.strategy.get_required_timeframes()
+                    if strat_tfs:
+                        required_tfs = list(strat_tfs)
+                except Exception:
+                    pass
+
+            # Fetch data for the strategy's required timeframes
+            all_timeframes = await self.data_fetcher.fetch_all_timeframes(symbol)
+
+            if not all_timeframes:
+                logger.warning(f"⚠️ Failed to fetch data for {symbol}")
+                return None
+
+            fetched_tfs = list(all_timeframes.keys())
+            logger.debug(f"   Fetched timeframes: {', '.join(fetched_tfs)}")
+
+            # Build kwargs dynamically so any strategy gets exactly the data it needs
+            strategy_kwargs = {
+                f"data_{tf}": all_timeframes.get(tf) for tf in required_tfs
+            }
+            strategy_kwargs["symbol"] = symbol
+            signal = self.strategy.analyze(**strategy_kwargs)
             
             # Add symbol to signal
             if signal:
                 signal['symbol'] = symbol
-                signal['asset_info'] = config.get_asset_info(symbol)
+                asset_info = None
+                if hasattr(self.strategy, "get_asset_config"):
+                    try:
+                        asset_info = (self.strategy.get_asset_config() or {}).get(symbol)
+                    except Exception:
+                        asset_info = None
+                if not asset_info:
+                    try:
+                        asset_info = config.get_asset_info(symbol)
+                    except Exception:
+                        asset_info = {}
+                signal['asset_info'] = asset_info
             
             return signal
             
         except Exception as e:
             logger.error(f"❌ Error analyzing {symbol}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
     
     async def scan_all_assets(self) -> List[Dict]:
@@ -314,7 +355,7 @@ class TradingBot:
                 logger.info(f"✅ {symbol}: Valid {result['signal']} signal (score: {result.get('score', 0)})")
             else:
                 reason = result['details'].get('reason', 'Unknown') if result else 'Analysis failed'
-                logger.debug(f"⚪ {symbol}: {reason}")
+                logger.info(f"⚪ {symbol}: {reason}")
         
         if not valid_signals:
             logger.info("📭 No valid signals found across all assets")
@@ -350,8 +391,8 @@ class TradingBot:
             logger.info(f"🎯 Selected {symbol} for trading (strongest signal)")
             
             # Validate trade parameters
-            if config.USE_TOPDOWN_STRATEGY:
-                # Top-Down: TP/SL come from strategy
+            if config.USE_TOPDOWN_STRATEGY or self.active_strategy == "Scalping":
+                # TP/SL come from the strategy signal (both top-down and scalping)
                 tp_price = signal.get('take_profit')
                 sl_price = signal.get('stop_loss')
                 
@@ -363,27 +404,51 @@ class TradingBot:
                 entry_price = signal.get('entry_price', 0)
                 if entry_price > 0:
                     rr_ratio = signal.get('risk_reward_ratio', 0)
-                    if rr_ratio < config.TOPDOWN_MIN_RR_RATIO:
-                        logger.warning(f"⚠️ {symbol}: R:R ratio {rr_ratio:.2f} below minimum {config.TOPDOWN_MIN_RR_RATIO}")
+                    # Use strategy-specific minimum RR if provided, else config default
+                    min_rr = signal.get('min_rr_required')
+                    if min_rr is None:
+                        min_rr = config.TOPDOWN_MIN_RR_RATIO
+                    if rr_ratio < min_rr:
+                        logger.warning(f"⚠️ {symbol}: R:R ratio {rr_ratio:.2f} below minimum {min_rr}")
                         return
                 
                 valid = True
-                msg = "Top-Down parameters validated"
+                msg = "Strategy parameters validated"
             else:
                 # Legacy: Validate only stake
-                valid, msg = self.risk_manager.validate_trade_parameters(
-                    stake=config.FIXED_STAKE or 50.0
-                )
+                if hasattr(self.risk_manager, "validate_trade_parameters"):
+                    valid, msg = self.risk_manager.validate_trade_parameters(
+                        stake=config.FIXED_STAKE or 50.0
+                    )
+                else:
+                    valid, msg = True, "No stake validation for strategy"
             
             if not valid:
                 logger.warning(f"⚠️ {symbol}: Invalid trade parameters: {msg}")
                 return
-            
+
+            # ── Dynamic stake from live balance (gold-style SL formula) ──
+            if getattr(config, "USE_SL_BASED_STAKE", False):
+                stake = await self._compute_sl_based_stake(signal, symbol)
+                if stake <= 0:
+                    logger.warning(
+                        f"⚠️ {symbol}: Computed stake below minimum "
+                        f"({getattr(config, 'STAKE_UNIT', 0.01):.2f}) - skipping trade"
+                    )
+                    return
+                signal['stake'] = stake
+                if hasattr(self.risk_manager, "update_risk_settings"):
+                    try:
+                        self.risk_manager.update_risk_settings(stake)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Could not update risk settings for stake ${stake}: {e}")
+                logger.info(f"💵 Dynamic stake: ${stake:.2f} (SL-based, capital formula)")
+
             # Execute trade
             logger.info(f"🚀 Executing {signal['signal']} trade on {symbol}...")
             
-            # Log trade details if using Top-Down
-            if config.USE_TOPDOWN_STRATEGY:
+            # Log trade details if available
+            if signal.get('entry_price') is not None:
                 logger.info(f"   📍 Entry: {signal.get('entry_price', 0):.4f}")
                 logger.info(f"   🎯 TP: {signal.get('take_profit', 0):.4f}")
                 logger.info(f"   🛡️ SL: {signal.get('stop_loss', 0):.4f}")
@@ -431,7 +496,61 @@ class TradingBot:
             logger.error(f"❌ Error in trading cycle: {e}")
             import traceback
             logger.error(traceback.format_exc())
-    
+
+    async def _compute_sl_based_stake(self, signal: dict, symbol: str) -> float:
+        """
+        Compute the trade stake using the gold-style SL formula with the
+        live Deriv account balance as capital.
+        """
+        try:
+            # 1. Live balance as capital (fallback to last-known on failure)
+            capital = await self.data_fetcher.get_balance()
+            if not capital:
+                capital = getattr(self, "_last_balance", 0.0)
+            if not capital or capital <= 0:
+                logger.warning(f"⚠️ {symbol}: No balance available for stake formula")
+                return 0.0
+            self._last_balance = capital
+
+            # 2. Per-symbol multiplier from the signal's asset info
+            asset_info = signal.get('asset_info') or {}
+            multiplier = asset_info.get('multiplier')
+            if not multiplier:
+                multiplier = getattr(config, 'MULTIPLIER', 50)
+            try:
+                multiplier = float(multiplier)
+            except (TypeError, ValueError):
+                multiplier = 50.0
+
+            # 3. Entry/SL
+            entry_price = signal.get('entry_price')
+            stop_loss = signal.get('stop_loss')
+            if not entry_price or not stop_loss:
+                logger.warning(f"⚠️ {symbol}: Missing entry/SL for stake formula")
+                return 0.0
+
+            unit = getattr(config, 'STAKE_UNIT', 0.01)
+            from conservative_strategy.strategy import calculate_stake_from_sl
+
+            stake = calculate_stake_from_sl(
+                capital=capital,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                multiplier=multiplier,
+                unit=unit,
+            )
+            logger.info(
+                f"💵 Stake formula: capital=${capital:.2f}, entry={entry_price:.5f}, "
+                f"SL={stop_loss:.5f}, mult={multiplier}x, unit={unit} -> stake=${stake:.2f}"
+            )
+            return stake
+
+        except Exception as e:
+            logger.error(f"❌ {symbol}: Stake formula error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return 0.0
+
     async def _save_state(self):
         try:
             state = {
@@ -526,7 +645,15 @@ def main():
     """Entry point"""
     try:
         # Determine strategy mode
-        strategy_name = "Top-Down Multi-Timeframe" if config.USE_TOPDOWN_STRATEGY else "Two-Phase Scalping"
+        active_strategy = normalize_strategy_name(
+            os.getenv("ACTIVE_STRATEGY", "Conservative")
+        )
+        if active_strategy == "Scalping":
+            strategy_name = "Scalping (Multi-Timeframe)"
+        elif active_strategy == "RiseFall":
+            strategy_name = "Rise/Fall"
+        else:
+            strategy_name = "Top-Down Multi-Timeframe" if config.USE_TOPDOWN_STRATEGY else "Two-Phase Scalping"
         
         # Print welcome banner
         print("\n" + "="*60)

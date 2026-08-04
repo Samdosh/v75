@@ -59,6 +59,31 @@ class TradeEngine:
             symbol for symbol in self.asset_configs.keys()
             if symbol not in self.blocked_symbols
         ]
+
+    def configure_assets(self, asset_configs: Dict = None, blocked_symbols=None) -> None:
+        """
+        Point the trade engine at a strategy-specific asset universe.
+
+        Scalping (and other strategies) keep their own ASSET_CONFIG/SYMBOLS,
+        so the shared trade engine must be re-scoped before trading their
+        symbols (e.g. R_25, 1HZ25V, stpRNG5).
+
+        Args:
+            asset_configs: symbol -> config dict (with 'multiplier').
+            blocked_symbols: iterable of symbols that must never be traded.
+        """
+        if asset_configs:
+            self.asset_configs = dict(asset_configs)
+        if blocked_symbols is not None:
+            self.blocked_symbols = set(blocked_symbols)
+        self.valid_symbols = [
+            symbol for symbol in self.asset_configs.keys()
+            if symbol not in self.blocked_symbols
+        ]
+        logger.info(f"🎯 Trade Engine asset universe updated: {len(self.valid_symbols)} symbols")
+        for symbol in self.valid_symbols:
+            mult = self.asset_configs[symbol].get('multiplier')
+            logger.info(f"     • {symbol}: {mult}x")
         
         logger.info(f"🎯 Trade Engine initialized")
         logger.info(f"   Risk Mode: {self.risk_mode}")
@@ -247,8 +272,11 @@ class TradeEngine:
             (ok: bool, reason: str, spread_pct: float | None)
         """
         try:
+            # Reconnect before checking if the WebSocket dropped (transient
+            # network blips should not abort a valid signal at the tick gate).
             if not self.is_connected or not self.ws or self.ws.closed:
-                return False, "WebSocket not connected", None
+                if not await self.ensure_connected():
+                    return False, "WebSocket not connected", None
 
             tick_req = {"ticks": symbol}
             async with self._ws_request_lock:

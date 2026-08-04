@@ -8,6 +8,11 @@
 !.env.example
 config_local.py
 
+# Runtime state (never commit)
+bot_state.json
+data/
+
+
 # ===================================
 # PYTHON
 # ===================================

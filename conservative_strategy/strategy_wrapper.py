@@ -76,6 +76,13 @@ class ConservativeStrategy(BaseStrategy):
 
         return list(config.SYMBOLS)
 
+    @property
+    def blocked_symbols(self):
+        """Symbols that must never be traded by this strategy."""
+        from . import config
+
+        return set(config.BLOCKED_SYMBOLS)
+
     def get_asset_config(self) -> Dict:
         """Return conservative asset configuration."""
         from . import config
