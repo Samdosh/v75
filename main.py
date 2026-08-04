@@ -433,7 +433,7 @@ class TradingBot:
                 if stake <= 0:
                     logger.warning(
                         f"⚠️ {symbol}: Computed stake below minimum "
-                        f"({getattr(config, 'STAKE_UNIT', 0.01):.2f}) - skipping trade"
+                        f"({getattr(config, 'MIN_STAKE', 1.00):.2f}) - skipping trade"
                     )
                     return
                 signal['stake'] = stake
@@ -530,6 +530,7 @@ class TradingBot:
                 return 0.0
 
             unit = getattr(config, 'STAKE_UNIT', 0.01)
+            min_stake = getattr(config, 'MIN_STAKE', 1.00)
             from conservative_strategy.strategy import calculate_stake_from_sl
 
             stake = calculate_stake_from_sl(
@@ -538,10 +539,12 @@ class TradingBot:
                 stop_loss=stop_loss,
                 multiplier=multiplier,
                 unit=unit,
+                min_stake=min_stake,
             )
             logger.info(
                 f"💵 Stake formula: capital=${capital:.2f}, entry={entry_price:.5f}, "
-                f"SL={stop_loss:.5f}, mult={multiplier}x, unit={unit} -> stake=${stake:.2f}"
+                f"SL={stop_loss:.5f}, mult={multiplier}x, unit={unit}, "
+                f"min_stake=${min_stake:.2f} -> stake=${stake:.2f}"
             )
             return stake
 

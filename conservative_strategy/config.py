@@ -74,8 +74,11 @@ except (TypeError, ValueError):
 # Dynamic SL-based stake (gold-style lot formula) using live account balance.
 # When enabled, overrides FIXED_STAKE per signal.
 USE_SL_BASED_STAKE = True
-# Minimum stake unit / step (0.01 as user-confirmed).
+# Formula step unit (0.01, as in the gold lot formula).
 STAKE_UNIT = 0.01
+# Minimum stake to actually submit. Deriv's confirmed minimum for R_75 is
+# $1.00 (live API rejects anything below). Computed stakes below this are skipped.
+MIN_STAKE = 1.00
 
 # Maximum Risk (Percentage of Stake)
 MAX_RISK_PCT = 50.0                # Never risk more than 50% of stake

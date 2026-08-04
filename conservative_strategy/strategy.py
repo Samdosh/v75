@@ -39,6 +39,7 @@ def calculate_stake_from_sl(
     stop_loss: float,
     multiplier: float = 50.0,
     unit: float = 0.01,
+    min_stake: float = 1.00,
 ) -> float:
     """
     Compute the trade stake using the gold-style lot formula.
@@ -52,7 +53,7 @@ def calculate_stake_from_sl(
     units         = floor(risk_budget / risk_per_unit)   # always round DOWN
     stake         = units * unit
 
-    Returns 0 (skip trade) if stake < unit.
+    Returns 0 (skip trade) if stake < min_stake.
     """
     if not capital or capital <= 0:
         return 0.0
@@ -83,8 +84,8 @@ def calculate_stake_from_sl(
     # 3. Units that fit in the risk budget (round DOWN)
     stake = math.floor(risk_budget / risk_per_unit) * unit
 
-    # 4. Skip if below the minimum unit
-    if stake < unit:
+    # 4. Skip if below the minimum submit-able stake (Deriv R_75 floor = $1.00)
+    if stake < min_stake:
         return 0.0
 
     return round(stake, 2)
