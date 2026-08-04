@@ -3,80 +3,27 @@ Scalping Bot Configuration
 All scalping-specific constants and thresholds
 """
 
-# Dedicated symbol universe for scalping (kept local for independence).
-# 1HZ100V and 1HZ30V are intentionally blocked and must never be traded.
-# 1HZ90V removed: Deriv does not offer multiplier trading on this asset.
-BLOCKED_SYMBOLS = {"1HZ100V", "1HZ30V", "R_100", "1HZ50V", "R_50", "1HZ90V"}
-SYMBOLS = ["R_25", "R_75", "1HZ25V", "1HZ75V", "stpRNG5", "stpRNG4"]
+# Dedicated symbol universe for scalping — V75 (R_75) ONLY.
+# Every other symbol is explicitly blocked and must never be traded.
+BLOCKED_SYMBOLS = {
+    "R_25", "R_50", "R_100",
+    "1HZ25V", "1HZ50V", "1HZ75V", "1HZ90V",
+    "1HZ100V", "1HZ30V",
+    "stpRNG5", "stpRNG4",
+}
+SYMBOLS = ["R_75"]
 
 # Empty rollout list means: trade full scalping symbol universe.
 SCALPING_ROLLOUT_SYMBOLS = []
 
 # Dedicated asset config for scalping (duplicated intentionally for isolation).
 ASSET_CONFIG = {
-    "R_25": {
-        "multiplier": 160,
-        "description": "Volatility 25 Index",
-        "tick_size": 0.01,
-        "movement_threshold_pct": 0.5,
-        "entry_distance_pct": 0.5,
-    },
-    "R_50": {
-        "multiplier": 80,
-        "description": "Volatility 50 Index",
-        "tick_size": 0.01,
-        "movement_threshold_pct": 0.7,
-        "entry_distance_pct": 0.7,
-    },
     "R_75": {
         "multiplier": 50,
         "description": "Volatility 75 Index",
         "tick_size": 0.01,
         "movement_threshold_pct": 0.8,
         "entry_distance_pct": 0.8,
-    },
-    "R_100": {
-        "multiplier": 40,
-        "description": "Volatility 100 Index",
-        "tick_size": 0.01,
-        "movement_threshold_pct": 1.0,
-        "entry_distance_pct": 1.0,
-    },
-    "1HZ25V": {
-        "multiplier": 160,
-        "description": "Volatility 25 (1s) Index",
-        "tick_size": 0.01,
-        "movement_threshold_pct": 0.9,
-        "entry_distance_pct": 0.9,
-    },
-    "1HZ50V": {
-        "multiplier": 80,
-        "description": "Volatility 50 (1s) Index",
-        "tick_size": 0.01,
-        "movement_threshold_pct": 1.1,
-        "entry_distance_pct": 1.1,
-    },
-    "1HZ75V": {
-        "multiplier": 50,
-        "description": "Volatility 75 (1s) Index",
-        "tick_size": 0.01,
-        "movement_threshold_pct": 1.2,
-        "entry_distance_pct": 1.2,
-    },
-    "stpRNG5": {
-        "multiplier": 100,
-        "description": "Step Index 500",
-        "tick_size": 0.1,
-        "movement_threshold_pct": 0.8,
-        "entry_distance_pct": 0.8,
-    },
-    "stpRNG4": {
-        "multiplier": 200,
-        "description": "Step Index 400",
-        "tick_size": 0.1,
-        # Strict entry profile: tolerate less short-term displacement.
-        "movement_threshold_pct": 0.45,
-        "entry_distance_pct": 0.45,
     },
 }
 
@@ -112,22 +59,12 @@ SCALPING_5M_EMA_SLOPE_MIN_PCT = 0.005
 # Asset-specific movement thresholds (conservative × 1.7)
 SCALPING_ASSET_MOVEMENT_MULTIPLIER = 1.7
 
-# Temporary directional guard for R_50 DOWN setups.
-SCALPING_R50_DOWN_MIN_CONFIDENCE = 9.0
-
-# Directional safety gate from the final improvement report:
-# suspend DOWN signals everywhere except explicit allowlist symbols.
+# Directional safety gate: suspend DOWN signals everywhere except allowlist.
 SCALPING_DOWN_DIRECTION_FILTER_ENABLED = False
-SCALPING_DOWN_ALLOWED_SYMBOLS = {"R_75", "stpRNG5"}
+SCALPING_DOWN_ALLOWED_SYMBOLS = {"R_75"}
 
-# Per-symbol ADX minimum overrides (directional). If no symbol override exists,
-# the global SCALPING_ADX_THRESHOLD is used.
-SCALPING_SYMBOL_ADX_OVERRIDES = {
-    "1HZ75V": {"DOWN": 50, "UP": 25},
-    "1HZ25V": {"DOWN": 25, "UP": 25},
-    # Strict stpRNG4 trend-quality requirement.
-    "stpRNG4": {"UP": 35, "DOWN": 40},
-}
+# Per-symbol ADX minimum overrides (directional). V75-only universe; no overrides needed.
+SCALPING_SYMBOL_ADX_OVERRIDES = {}
 
 # ==================== SCALPING RISK MANAGEMENT ====================
 # Portfolio-wide concurrent cap across all symbols.
@@ -194,9 +131,7 @@ SCALPING_STAGNATION_RR_GRACE_THRESHOLD = 2.5
 SCALPING_STAGNATION_EXTRA_TIME = 0  # disabled by default for strict 75s/3.0% behavior
 
 SCALPING_SYMBOL_STAGNATION_OVERRIDES = {
-    "stpRNG5": 120,
     "R_75": 120,
-    "R_25": 120,
 }
 
 # ==================== TRAILING PROFIT ====================
@@ -221,20 +156,5 @@ SCALPING_TRAIL_BREACH_CONFIRMATIONS = 2
 # Minimum time after trailing activation before floor breaches can force an exit.
 SCALPING_TRAIL_MIN_ACTIVE_SECONDS = 10
 
-# Per-symbol trailing overrides for noisy instruments.
-SCALPING_SYMBOL_TRAIL_OVERRIDES = {
-    # Volatility 25 (1s): keep winners alive longer by delaying first eligible
-    # trail exit and requiring confirmation of breakdown.
-    "1HZ25V": {
-        "activation_pct": 6.0,
-        "tiers": [
-            (35.0, 10.0),
-            (25.0, 8.0),
-            (15.0, 6.0),
-            (10.0, 4.0),
-        ],
-        "breach_confirmations": 2,
-        "min_active_seconds": 30,
-        "breakeven_floor_pct": 0.0,
-    },
-}
+# Per-symbol trailing overrides. V75-only universe; none needed.
+SCALPING_SYMBOL_TRAIL_OVERRIDES = {}

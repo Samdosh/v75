@@ -388,7 +388,7 @@ def test_global_consecutive_loss_cooldown_and_recovery_reset(srm):
     srm.record_trade_close("L1", -1.0, "loss")
     _open_trade(srm, "L2", "R_75")
     srm.record_trade_close("L2", -1.0, "lost")
-    _open_trade(srm, "L3", "R_25")
+    _open_trade(srm, "L3", "R_75")
     srm.record_trade_close("L3", -1.0, "loss")
 
     can, reason = srm.can_trade("R_75")
@@ -397,8 +397,9 @@ def test_global_consecutive_loss_cooldown_and_recovery_reset(srm):
 
     # Expire cooldown -> counter resets and recovery mode starts.
     srm.loss_cooldown_until = datetime.now() - timedelta(seconds=1)
+    srm.symbol_cooldown_until.pop("R_75", None)
     srm.last_trade_time = datetime.now() - timedelta(seconds=srm.cooldown_seconds + 1)
-    can_after, _ = srm.can_trade("R_25")
+    can_after, _ = srm.can_trade("R_75")
     assert can_after is True
     assert srm.consecutive_losses == 0
 
